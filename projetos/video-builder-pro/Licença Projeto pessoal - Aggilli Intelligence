@@ -1,1 +1,45 @@
+---
 
+### 5. projetos/video-builder-pro/v7.2-projetos/README.md
+
+```markdown
+# Video Builder Pro v7.2
+
+**Data:** 23/10/2026  
+**Status:** ✅ Estável para uso
+
+## Novidades v7.2
+
+### Salvar/Abrir Projeto
+- Formato `.vbp` (JSON)
+- Salva: timeline, vídeos, pasta render, configurações
+- Abre: restaura projeto completo
+
+### Pasta de Render
+- Campo para escolher pasta destino
+- Botão "Criar Pasta" (cria automaticamente)
+- Render usa pasta escolhida + nome do projeto
+
+## Arquivos
+
+- `video_builder_pro_v7.2_suite.py` (72 KB) - Código principal
+- `VideoBuilderPro_v72.bat` - Launcher Windows
+
+## Uso
+
+1. Execute `VideoBuilderPro_v72.bat`
+2. Monte seu projeto (importe, timeline, configure)
+3. **Salve**: Arquivo → Salvar Projeto (.vbp)
+4. **Renderize**: Escolha pasta → RENDERIZAR
+
+## Restaurar projeto
+
+1. Arquivo → Abrir Projeto (.vbp)
+2. Tudo volta como estava: clips, transições, cores, pasta
+
+## Notas técnicas
+
+- Projeto salvo em JSON com encoding UTF-8
+- Enums serializados como strings (TransitionType.CUT → "CUT")
+- AudioConfig serializado com dataclasses.asdict()
+- Pasta render persistida no config_v7.json
