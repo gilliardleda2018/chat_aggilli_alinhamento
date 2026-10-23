@@ -1,0 +1,22 @@
+# Backups
+
+Cópias de segurança de versões funcionando do Video Builder Pro.
+
+## Arquivos
+
+| Arquivo | Versão | Data | Tamanho |
+|---------|--------|------|---------|
+| `video-builder-pro-v7-funcionando.py` | v7.0 | 22/10/2026 | ~49 KB |
+| `video-builder-pro-v7.2-suite.py` | v7.2 | 23/10/2026 | ~72 KB |
+
+## Como restaurar
+
+1. Copie o arquivo de backup
+2. Renomeie para `video_builder_pro_vX.X_suite.py`
+3. Coloque na pasta do projeto
+4. Salve em UTF-8
+
+## Notas
+
+- Sempre manter backup da versão estável mais recente
+- v7.0 mantida como fallback caso v7.2 apresente problemas
