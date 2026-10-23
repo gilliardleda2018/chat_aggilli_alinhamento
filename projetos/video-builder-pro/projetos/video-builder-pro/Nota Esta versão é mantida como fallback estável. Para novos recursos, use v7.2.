@@ -27,3 +27,22 @@
    - v7.0 estável mantido
 
 ## Estrutura final
+chat_aggilli_alinhamento/
+├── projetos/video-builder-pro/
+│   ├── v7.0-estavel/
+│   ├── v7.1-transicoes/
+│   └── v7.2-projetos/
+├── contextos/
+├── skills/
+└── backups/
+## Próximos passos
+
+- [ ] Testar v7.2: salvar projeto → fechar → abrir → verificar integridade
+- [ ] Se funcionar: tornar v7.2 a versão principal
+- [ ] Implementar preview da timeline
+- [ ] Implementar multicam
+
+## Notas
+
+- Arquivo v7.1 não foi criado separadamente (v7.2 inclui tudo)
+- Usar v7.2 como base para próximas features
