@@ -1,0 +1,11 @@
+  File "C:\Users\umled\Downloads\FireShot\VIDEOS TESTE-20261021T225738Z-1-001\VIDEOS TESTE\VideoBuilder_5\video_builder_pro_v7_suite.py", line 5
+    def renderizar(self):
+                         ^
+IndentationError: unindent does not match any outer indentation level
+Traceback (most recent call last):
+  File "C:\Users\umled\Downloads\FireShot\VIDEOS TESTE-20261021T225738Z-1-001\VIDEOS TESTE\VideoBuilder_5\video_builder_pro_v7_suite.py", line 448, in <module>
+    main()
+  File "C:\Users\umled\Downloads\FireShot\VIDEOS TESTE-20261021T225738Z-1-001\VIDEOS TESTE\VideoBuilder_5\video_builder_pro_v7_suite.py", line 442, in main
+    root = tk.Tk()
+NameError: name 'tk' is not defined
+^C^C
