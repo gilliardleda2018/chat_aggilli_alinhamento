@@ -1,0 +1,5 @@
+video-builder-pro/
+├── v7.X-nome/
+│   ├── video_builder_pro_vX_suite.py   # Código principal
+│   ├── VideoBuilderPro_vX.bat          # Launcher Windows
+│   └── README.md                        # Notas da versão
