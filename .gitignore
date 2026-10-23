@@ -1,0 +1,22 @@
+# Logs
+*.log
+
+# Temp
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.tmp
+*.temp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config local (contem chave API)
+.video_builder_pro/
+
+# Renders
+render/
+output/
