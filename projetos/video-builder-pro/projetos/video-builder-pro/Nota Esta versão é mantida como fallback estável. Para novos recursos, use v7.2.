@@ -1,0 +1,29 @@
+---
+
+### 7. contextos/2026-10-23-empacotamento.md
+
+```markdown
+# Contexto: Empacotamento do Projeto para GitHub
+
+**Data:** 23/10/2026  
+**Status:** ✅ Concluído  
+**Próxima tarefa:** Testar v7.2 salvar/abrir projeto
+
+## O que foi feito
+
+1. **Organização do repositório**
+   - Estrutura de pastas por versão (v7.0, v7.1, v7.2)
+   - README.md atualizado na raiz
+   - CHANGELOG.md criado com histórico completo
+   - .gitignore configurado
+
+2. **Documentação**
+   - README.md por versão
+   - README.md do projeto geral
+   - Contextos atualizados
+
+3. **Backup**
+   - v7.2 adicionado aos backups
+   - v7.0 estável mantido
+
+## Estrutura final
