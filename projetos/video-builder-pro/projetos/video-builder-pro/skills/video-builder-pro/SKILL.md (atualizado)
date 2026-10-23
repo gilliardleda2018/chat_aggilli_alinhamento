@@ -1,0 +1,63 @@
+---
+name: video-builder-pro
+description: Use ao trabalhar no app Video Builder Pro (editor de vídeo em Python/Tkinter com FFmpeg e Claude AI). Cobre localização dos arquivos, estado atual do código, histórico de correções, configuração da API do Claude e pendências do projeto.
+user-invocable: true
+---
+
+# Video Builder Pro — Contexto do Projeto
+
+App desktop do usuário: editor de vídeo profissional em Python + Tkinter, com FFmpeg e IA (Claude). Use esta habilidade em qualquer tarefa que mencione o app.
+
+## Versão atual: v7.2 (23/10/2026)
+
+| Item | Valor |
+|------|-------|
+| Script principal | `video_builder_pro_v7.2_suite.py` (72 KB) |
+| Launcher | `VideoBuilderPro_v72.bat` |
+| Novidade | Salvar/Abrir projeto (.vbp JSON) + escolher pasta render |
+| Status | ✅ Estável para uso |
+
+## Onde estão as coisas (local)
+
+| Item | Caminho |
+|------|---------|
+| Pasta do projeto | `VIDEOS TESTE-20261021T225738Z-1-001/VIDEOS TESTE/VideoBuilder_5/` |
+| Script v7.2 | `video_builder_pro_v7.2_suite.py` (72 KB) |
+| Launcher v7.2 | `VideoBuilderPro_v72.bat` |
+| Config + chave API | `%USERPROFILE%\.video_builder_pro\config_v7.json` |
+
+## Repositório GitHub
+
+- **URL**: `github.com/gilliardleda2018/chat_aggilli_alinhamento`
+- **Estrutura**: `projetos/video-builder-pro/v7.2-projetos/`
+
+## Estado atual
+
+- v7.0 estável (49 KB) - mantida como fallback
+- v7.2 atual (72 KB) - com salvar/abrir projeto
+- Claude AI: `claude-haiku-4-5-20251001`
+- Repositório GitHub organizado e documentado
+
+## Regras aprendidas
+
+1. Sempre entregar arquivo INTEIRO em um bloco
+2. Salvar em UTF-8
+3. Verificar tamanho antes/depois (~72 KB é v7.2)
+4. Log protegido (self.log_text is not None)
+5. Threads com daemon=True
+6. Ler log primeiro se der erro
+7. Modelo Claude com data: `claude-haiku-4-5-20251001`
+
+## Pendências
+
+- [ ] Testar salvar/abrir projeto v7.2
+- [ ] Preview da timeline com ffplay
+- [ ] Multicam funcional
+- [ ] Speed ramp
+- [ ] QC com true peak real
+
+## Como restaurar
+
+1. Leia `backups/video-builder-pro-v7.2-suite.py`
+2. Entregue em UM bloco
+3. Confira: 1ª linha `#!/usr/bin/env python3`, última `    main()`, ~72 KB
