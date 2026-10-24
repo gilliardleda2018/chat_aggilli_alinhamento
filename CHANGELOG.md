@@ -1,52 +1,91 @@
 # Changelog - Video Builder Pro
 
+## [v7.5] - 2026-10-23 (FINAL)
+
+### Adicionado
+- **19 abas funcionais** (8 originais + 11 novas)
+- **Video Downloader** (yt-dlp): YouTube, TikTok, Instagram, etc
+- **Face Restore** (GFPGAN): Restauração de rostos em videos
+- **WhisperX**: Legendas karaokê com word-level timestamps
+- **Upscale AI** (Real-ESRGAN): SD → HD → 4K
+- **Audio Stems** (Demucs): Separação vocals/instrumental
+- **Legendas Turbo** (faster-whisper): 4x mais rápido
+
+### Integrações AI
+- Claude AI (roteiros, títulos, descrições)
+- Whisper AI (legendas automáticas)
+- faster-whisper (legendas 4x mais rápidas)
+- WhisperX (karaokê word-level)
+- Demucs (separação de áudio)
+- Real-ESRGAN (upscale de video)
+- GFPGAN (restauração facial)
+
+### Técnico
+- Sistema modular com patch architecture
+- GPU encoding (NVENC/AMF/QuickSync)
+- 70+ transições GL com easing
+- 15+ LUTs profissionais
+- Auto-edição (detectar cenas, remover silêncios)
+- Conversor vertical 9:16 (TikTok/Reels)
+- QC automático (loudness, true peak, checksums)
+
+### Corrigido
+- Métodos bool sendo chamados como funções (patch v7.5)
+- Download de vídeos: formato simples funciona sem Node.js
+
+---
+
+## [v7.4] - 2026-10-23
+
+### Adicionado
+- **16 abas funcionais**
+- Upscale AI (Real-ESRGAN)
+- Audio Stems (Demucs)
+- Legendas Turbo (faster-whisper)
+
+---
+
+## [v7.3] - 2026-10-23
+
+### Adicionado
+- **13 abas funcionais**
+- 70+ transições GL com easing
+- 15+ LUTs embutidas
+- Auto-edição (detectar cenas, remover silêncios)
+- Legendas AI (Whisper)
+- Conversor vertical 9:16
+- GPU encoding
+
+---
+
 ## [v7.2] - 2026-10-23
 
 ### Adicionado
-- Salvar/Abrir projeto em formato .vbp (JSON)
-- Escolher pasta de renderização com criação automática
-- Campo de pasta de render na aba Projeto e aba Render
-- Botão "Criar Pasta" para verificar/criar diretório
-
-### Corrigido
-- Render agora usa pasta escolhida pelo usuário
+- Salvar/Abrir projeto (.vbp JSON)
+- Escolher pasta de renderização
+- Transições entre clips
+- Color grading por clip
 
 ---
 
 ## [v7.1] - 2026-10-22
 
 ### Adicionado
-- Transições entre clips: CROSSFADE, FADE_BLACK, FADE_WHITE, ZOOM_IN, ZOOM_OUT, SLIDE_LEFT, SLIDE_RIGHT, DISSOLVE
-- Color grading por clip: CINEMATIC, ORANGE_TEAL, FILM_NOIR, VIBRANT, WARM, COLD, BLEACH_BYPASS, DAY_FOR_NIGHT
-- Interface de timeline com seleção de clip e aplicação de configurações
-- Normalização de clips para mesma resolução/fps antes do render
-
-### Técnico
-- Render usa filter_complex do FFmpeg para xfade
-- Clips processados individualmente antes da concatenação
+- Claude AI integrada
+- Roteiros, títulos, descrições
+- Capítulos e hashtags
 
 ---
 
 ## [v7.0] - 2026-10-22
 
-### Adicionado
-- Integração Claude AI (aba IA)
-- Geração de: roteiro, títulos, descrição YouTube, capítulos, hashtags, melhorar texto
-- Modelo padrão: claude-haiku-4-5-20251001
-- Chave API salva localmente (base64)
-
-### Interface
+### Inicial
 - 8 abas: Projeto, Mídia, Timeline, Cor, Áudio, IA, Render, QC
-- Menu completo: Arquivo, Edição, Ferramentas, Ajuda
-
-### Estabilidade
-- Proteção no método log() para não quebrar antes da UI
-- Threads com daemon=True
-- Sem emojis em botões (compatibilidade Windows)
+- Renderização básica com FFmpeg
+- Menu completo
 
 ---
 
 ## [v6.0] - Legado
 
 - Versão anterior sem integração AI
-- Render básico por concatenação
