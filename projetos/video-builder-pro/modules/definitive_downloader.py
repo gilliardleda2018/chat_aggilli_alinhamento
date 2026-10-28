@@ -1,6 +1,7 @@
 from pathlib import Path
 import subprocess
 import shutil
+import os
 
 try:
     import yt_dlp
@@ -16,36 +17,84 @@ except ImportError:
 
 
 def _detectar_browser():
-    """Detecta qual navegador esta disponivel para extrair cookies."""
-    for browser in ("firefox", "chromium", "chromium-browser", "chrome", "brave"):
-        if shutil.which(browser):
-            # Retorna nome compativel com yt-dlp
-            if "chromium" in browser:
-                return "chromium"
-            if browser == "chromium-browser":
-                return "chromium"
-            return browser
-    return None
+    """
+    Detecta navegador e perfil correto, mesmo rodando como root.
+    Procura nos perfis do usuario real (SUDO_USER ou home /home/*).
+    """
+    # Usuario real (pode ser diferente de root)
+    usuario_real = os.environ.get("SUDO_USER") or os.environ.get("USER", "")
+    homes_candidatos = []
+
+    if usuario_real and usuario_real != "root":
+        homes_candidatos.append(Path(f"/home/{usuario_real}"))
+
+    # Fallback: varre /home/
+    for home in Path("/home").iterdir():
+        if home.is_dir() and home not in homes_candidatos:
+            homes_candidatos.append(home)
+
+    # Mapeamento: browser -> caminhos possiveis do perfil
+    perfis = {
+        "firefox": [
+            ".mozilla/firefox",
+            ".var/app/org.mozilla.firefox/.mozilla/firefox",
+            "snap/firefox/common/.mozilla/firefox",
+            ".config/mozilla/firefox",
+        ],
+        "chromium": [
+            ".config/chromium",
+            ".var/app/org.chromium.Chromium/config/chromium",
+            "snap/chromium/current/.config/chromium",
+        ],
+        "chrome": [
+            ".config/google-chrome",
+            ".var/app/com.google.Chrome/config/google-chrome",
+        ],
+    }
+
+    for home in homes_candidatos:
+        for browser, subpaths in perfis.items():
+            for sub in subpaths:
+                full = home / sub
+                if full.exists():
+                    return browser, str(full)
+
+    return None, None
 
 
 class DefinitiveDownloader:
     def __init__(self, log_callback):
         self.log = log_callback
-        self.browser = _detectar_browser()
+        self.browser = None
+        self.browser_path = None
+
         if YT_DLP_OK:
-            self.log(f"[OK] yt-dlp disponivel")
-            if self.browser:
-                self.log(f"[OK] Cookies do {self.browser} serao usados automaticamente")
+            self.log("[OK] yt-dlp disponivel")
+            browser, path = _detectar_browser()
+            if browser:
+                self.browser = browser
+                self.browser_path = path
+                self.log(f"[OK] Cookies: {browser} em {path}")
             else:
-                self.log("[AVISO] Nenhum navegador detectado para cookies (pode falhar no YouTube)")
+                self.log("[AVISO] Nenhum perfil de navegador encontrado.")
+                self.log("[AVISO] Videos do YouTube podem falhar por bot-check.")
+                self.log("[DICA] Exporte cookies manualmente:")
+                self.log("  yt-dlp --cookies cookies.txt <URL>")
+                self.log("  e use o arquivo cookies.txt no campo de cookies")
+
         if INSTA_OK:
             self.log("[OK] instaloader disponivel")
 
     def _opcoes_base(self):
-        """Opcoes base do yt-dlp com suporte a cookies."""
+        """Opcoes base com cookies se disponivel."""
         opts = {"quiet": True}
         if self.browser:
-            opts["cookiesfrombrowser"] = (self.browser,)
+            opts["cookiesfrombrowser"] = (self.browser, self.browser_path)
+        # Fallback: arquivo cookies.txt na pasta do app
+        cookies_file = Path(__file__).parent.parent / "cookies.txt"
+        if cookies_file.exists():
+            opts["cookiefile"] = str(cookies_file)
+            self.log(f"[OK] Usando cookies.txt: {cookies_file}")
         return opts
 
     def obter_info(self, url: str) -> dict:
