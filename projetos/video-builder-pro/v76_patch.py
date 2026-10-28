@@ -262,33 +262,57 @@ class V73Patch:
         self.turbo_log.insert(tk.END, "Aguardando acao...\n")
 
     def criar_aba_download(self, nb):
+        """ABA 17: Download - layout com painel esquerdo fixo + log expandivel"""
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Download  ")
-        ttk.Label(frame, text="Download de Videos (yt-dlp)", font=("Helvetica", 16, "bold")).pack(pady=20)
-        sf = ttk.LabelFrame(frame, text="Status", padding=15)
-        sf.pack(fill=tk.X, padx=20, pady=10)
+
+        # Titulo
+        ttk.Label(frame, text="Download de Videos (yt-dlp)", font=("Helvetica", 14, "bold")).pack(pady=8)
+
+        # Painel principal: esquerda (controles) + direita (log)
+        painel = ttk.Frame(frame)
+        painel.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # --- ESQUERDA: controles fixos ---
+        esq = ttk.Frame(painel, width=420)
+        esq.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        esq.pack_propagate(False)
+
+        # Status
+        sf = ttk.LabelFrame(esq, text="Status", padding=8)
+        sf.pack(fill=tk.X, pady=(0, 6))
         if self.downloader is not None:
             ttk.Label(sf, text="[OK] yt-dlp + instaloader prontos", foreground="green").pack(anchor=tk.W)
-            ttk.Label(sf, text="  YouTube, Instagram, TikTok, Vimeo e 1000+ sites", foreground="green").pack(anchor=tk.W)
+            ttk.Label(sf, text="YouTube, Instagram, TikTok, Vimeo...", foreground="green").pack(anchor=tk.W)
         else:
             ttk.Label(sf, text="[!] pip install yt-dlp instaloader", foreground="red").pack(anchor=tk.W)
-        uf = ttk.LabelFrame(frame, text="URL do Video", padding=15)
-        uf.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Label(uf, text="Cole a URL:").pack(anchor=tk.W)
-        self.download_url = ttk.Entry(uf, width=60, font=("Consolas", 10))
-        self.download_url.pack(fill=tk.X, pady=5)
-        ttk.Button(uf, text="Obter Info", command=self.obter_info_video).pack(pady=5)
-        cf = ttk.LabelFrame(frame, text="Qualidade", padding=15)
-        cf.pack(fill=tk.X, padx=20, pady=10)
+
+        # URL
+        uf = ttk.LabelFrame(esq, text="URL do Video", padding=8)
+        uf.pack(fill=tk.X, pady=(0, 6))
+        self.download_url = ttk.Entry(uf, font=("Consolas", 9))
+        self.download_url.pack(fill=tk.X, pady=4)
+        ttk.Button(uf, text="Obter Info", command=self.obter_info_video).pack(fill=tk.X)
+
+        # Qualidade
+        qf = ttk.LabelFrame(esq, text="Qualidade", padding=8)
+        qf.pack(fill=tk.X, pady=(0, 6))
         self.download_qualidade = tk.StringVar(value="best")
         for txt, val in [("Melhor qualidade","best"),("1080p","1080p"),("720p","720p"),("480p","480p"),("Apenas audio","audio")]:
-            ttk.Radiobutton(cf, text=txt, variable=self.download_qualidade, value=val).pack(anchor=tk.W)
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Baixar Video", command=self.baixar_video).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Baixar Playlist (max 10)", command=self.baixar_playlist).pack(fill=tk.X, pady=5)
-        self.download_log = scrolledtext.ScrolledText(frame, height=10, font=("Consolas", 9))
-        self.download_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+            ttk.Radiobutton(qf, text=txt, variable=self.download_qualidade, value=val).pack(anchor=tk.W)
+
+        # Acoes — SEMPRE VISIVEIS
+        af = ttk.LabelFrame(esq, text="Acoes", padding=8)
+        af.pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(af, text="Baixar Video", command=self.baixar_video).pack(fill=tk.X, pady=3)
+        ttk.Button(af, text="Baixar Playlist (max 10)", command=self.baixar_playlist).pack(fill=tk.X, pady=3)
+
+        # --- DIREITA: log expandivel ---
+        dir_ = ttk.Frame(painel)
+        dir_.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ttk.Label(dir_, text="Log:", font=("Helvetica", 10, "bold")).pack(anchor=tk.W)
+        self.download_log = scrolledtext.ScrolledText(dir_, font=("Consolas", 9))
+        self.download_log.pack(fill=tk.BOTH, expand=True)
         self.download_log.insert(tk.END, "Cole uma URL e clique em Baixar\n")
         self.download_log.insert(tk.END, "Suporta: YouTube, Instagram, TikTok, Vimeo, Twitter e mais\n")
 
@@ -378,7 +402,7 @@ class V73Patch:
         def t():
             try:
                 self.luts.aplicar_lut(Path(v), lut.nome, Path(s), self.lut_intensidade.get())
-                messagebox.showinfo("Sucesso", f"LUT aplicado!\n{s}")
+                messagebox.showinfo("Sucesso", f"LUT aplicado!")
             except Exception as e:
                 messagebox.showerror("Erro", str(e))
         threading.Thread(target=t, daemon=True).start()
@@ -409,7 +433,7 @@ class V73Patch:
             try:
                 self.auto_editor.remover_silencios_simples(Path(v), Path(s), thr)
                 self.log_auto(f"[OK] Salvo: {s}")
-                messagebox.showinfo("Sucesso", f"Silencios removidos!")
+                messagebox.showinfo("Sucesso", "Silencios removidos!")
             except Exception as e:
                 import traceback
                 self.log_auto(f"[ERRO] {e}\n{traceback.format_exc()}")
@@ -425,7 +449,7 @@ class V73Patch:
             try:
                 srt = self.subtitles.gerar_legendas(Path(v), self.legendas_idioma.get(), self.legendas_modelo.get(), "srt")
                 self.legendas_log.insert(tk.END, f"[OK] {srt}\n")
-                messagebox.showinfo("Sucesso", f"Legendas geradas!")
+                messagebox.showinfo("Sucesso", "Legendas geradas!")
             except Exception as e:
                 self.legendas_log.insert(tk.END, f"[ERRO] {e}\n")
                 messagebox.showerror("Erro", str(e))
@@ -441,7 +465,7 @@ class V73Patch:
         def t():
             try:
                 self.subtitles.queimar_legendas(Path(v), Path(srt), Path(s))
-                messagebox.showinfo("Sucesso", f"Legendas queimadas!")
+                messagebox.showinfo("Sucesso", "Legendas queimadas!")
             except Exception as e:
                 messagebox.showerror("Erro", str(e))
         threading.Thread(target=t, daemon=True).start()
@@ -454,7 +478,7 @@ class V73Patch:
         def t():
             try:
                 self.vertical.converter(Path(v), Path(s), self.vertical_modo.get(), self.vertical_blur.get())
-                messagebox.showinfo("Sucesso", f"Convertido!")
+                messagebox.showinfo("Sucesso", "Convertido!")
             except Exception as e:
                 messagebox.showerror("Erro", str(e))
         threading.Thread(target=t, daemon=True).start()
@@ -468,7 +492,7 @@ class V73Patch:
         def t():
             try:
                 self.upscaler.upscale(Path(v), Path(s), escala, self.upscale_gpu.get())
-                messagebox.showinfo("Sucesso", f"Upscale concluido!")
+                messagebox.showinfo("Sucesso", "Upscale concluido!")
             except Exception as e:
                 self.upscale_log.insert(tk.END, f"[ERRO] {e}\n")
                 messagebox.showerror("Erro", str(e))
@@ -524,7 +548,7 @@ class V73Patch:
                         self.turbo_log.insert(tk.END, f"[{self._format_timestamp(seg.start)}] {seg.text.strip()}\n")
                         self.turbo_log.see(tk.END)
                         self.app.root.update_idletasks()
-                messagebox.showinfo("Sucesso", f"Legendas geradas!")
+                messagebox.showinfo("Sucesso", "Legendas geradas!")
             except Exception as e:
                 self.turbo_log.insert(tk.END, f"[ERRO] {e}\n")
                 messagebox.showerror("Erro", str(e))
@@ -556,7 +580,7 @@ class V73Patch:
                 self.download_log.insert(tk.END, f"Baixando: {url}\n")
                 arq = self.downloader.baixar_video(url, Path(p), self.download_qualidade.get())
                 self.download_log.insert(tk.END, f"[OK] {arq}\n")
-                messagebox.showinfo("Sucesso", f"Baixado!")
+                messagebox.showinfo("Sucesso", "Baixado!")
             except Exception as e:
                 self.download_log.insert(tk.END, f"[ERRO] {e}\n")
                 messagebox.showerror("Erro", str(e))
@@ -586,7 +610,7 @@ class V73Patch:
         def t():
             try:
                 self.face_restore.restaurar_video(Path(v), Path(s))
-                messagebox.showinfo("Sucesso", f"Rostos restaurados!")
+                messagebox.showinfo("Sucesso", "Rostos restaurados!")
             except Exception as e:
                 self.face_log.insert(tk.END, f"[ERRO] {e}\n")
                 messagebox.showerror("Erro", str(e))
@@ -611,7 +635,7 @@ class V73Patch:
                     for seg in result["segments"]:
                         for w in seg.get("words", []):
                             f.write(f"Dialogue: 0,{self._format_ass_time(w['start'])},{self._format_ass_time(w['end'])},Default,,0,0,0,,{w['word'].strip()}\n")
-                messagebox.showinfo("Sucesso", f"Karaoke gerado!")
+                messagebox.showinfo("Sucesso", "Karaoke gerado!")
             except Exception as e:
                 self.whisperx_log.insert(tk.END, f"[ERRO] {e}\n")
                 messagebox.showerror("Erro", str(e))
