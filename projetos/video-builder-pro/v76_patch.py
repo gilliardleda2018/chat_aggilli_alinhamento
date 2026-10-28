@@ -13,6 +13,26 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 import threading
 
+# --- Bibliotecas profissionais opcionais ---
+try:
+    import moviepy.editor as mpy
+    MOVIEPY_OK = True
+except Exception:
+    MOVIEPY_OK = False
+
+try:
+    import ffmpeg as ffmpeg_python
+    FFMPEG_PYTHON_OK = True
+except Exception:
+    FFMPEG_PYTHON_OK = False
+
+try:
+    from pydub import AudioSegment
+    from pydub import effects as pydub_effects
+    PYDUB_OK = True
+except Exception:
+    PYDUB_OK = False
+
 
 def aplicar_patch(app):
     patch = V73Patch(app)
@@ -30,6 +50,22 @@ class V73Patch:
         self.subtitles = SubtitlesAI(self.log)
         self.vertical = VerticalConverter(self.log)
         self.gpu = GPUEncoder(self.log)
+
+        # Reportar bibliotecas profissionais
+        if MOVIEPY_OK:
+            self.log("[OK] moviepy disponivel (preview + speed ramp)")
+        else:
+            self.log("[AVISO] moviepy nao instalado: pip install moviepy")
+
+        if FFMPEG_PYTHON_OK:
+            self.log("[OK] ffmpeg-python disponivel (render avancado)")
+        else:
+            self.log("[AVISO] ffmpeg-python nao instalado: pip install ffmpeg-python")
+
+        if PYDUB_OK:
+            self.log("[OK] pydub disponivel (analise de audio)")
+        else:
+            self.log("[AVISO] pydub nao instalado: pip install pydub")
 
         try:
             from upscaler import VideoUpscaler
@@ -94,6 +130,11 @@ class V73Patch:
             self.auto_log.insert(tk.END, f"{msg}\n")
             self.auto_log.see(tk.END)
             self.app.root.update_idletasks()
+
+    # =========================================================
+    # NOVA ABA: EDITOR PROFISSIONAL (moviepy + ffmpeg-python)
+    # Substitui os placeholders preview/speed_ramp do app base
+    # =========================================================
 
     def criar_aba_transicoes_gl(self, nb):
         frame = ttk.Frame(nb)
@@ -262,23 +303,14 @@ class V73Patch:
         self.turbo_log.insert(tk.END, "Aguardando acao...\n")
 
     def criar_aba_download(self, nb):
-        """ABA 17: Download - layout com painel esquerdo fixo + log expandivel"""
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Download  ")
-
-        # Titulo
         ttk.Label(frame, text="Download de Videos (yt-dlp)", font=("Helvetica", 14, "bold")).pack(pady=8)
-
-        # Painel principal: esquerda (controles) + direita (log)
         painel = ttk.Frame(frame)
         painel.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        # --- ESQUERDA: controles fixos ---
         esq = ttk.Frame(painel, width=420)
         esq.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
         esq.pack_propagate(False)
-
-        # Status
         sf = ttk.LabelFrame(esq, text="Status", padding=8)
         sf.pack(fill=tk.X, pady=(0, 6))
         if self.downloader is not None:
@@ -286,28 +318,20 @@ class V73Patch:
             ttk.Label(sf, text="YouTube, Instagram, TikTok, Vimeo...", foreground="green").pack(anchor=tk.W)
         else:
             ttk.Label(sf, text="[!] pip install yt-dlp instaloader", foreground="red").pack(anchor=tk.W)
-
-        # URL
         uf = ttk.LabelFrame(esq, text="URL do Video", padding=8)
         uf.pack(fill=tk.X, pady=(0, 6))
         self.download_url = ttk.Entry(uf, font=("Consolas", 9))
         self.download_url.pack(fill=tk.X, pady=4)
         ttk.Button(uf, text="Obter Info", command=self.obter_info_video).pack(fill=tk.X)
-
-        # Qualidade
         qf = ttk.LabelFrame(esq, text="Qualidade", padding=8)
         qf.pack(fill=tk.X, pady=(0, 6))
         self.download_qualidade = tk.StringVar(value="best")
         for txt, val in [("Melhor qualidade","best"),("1080p","1080p"),("720p","720p"),("480p","480p"),("Apenas audio","audio")]:
             ttk.Radiobutton(qf, text=txt, variable=self.download_qualidade, value=val).pack(anchor=tk.W)
-
-        # Acoes — SEMPRE VISIVEIS
         af = ttk.LabelFrame(esq, text="Acoes", padding=8)
         af.pack(fill=tk.X, pady=(0, 6))
         ttk.Button(af, text="Baixar Video", command=self.baixar_video).pack(fill=tk.X, pady=3)
         ttk.Button(af, text="Baixar Playlist (max 10)", command=self.baixar_playlist).pack(fill=tk.X, pady=3)
-
-        # --- DIREITA: log expandivel ---
         dir_ = ttk.Frame(painel)
         dir_.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ttk.Label(dir_, text="Log:", font=("Helvetica", 10, "bold")).pack(anchor=tk.W)
@@ -363,35 +387,260 @@ class V73Patch:
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Auto-Edit Suite  ")
         ttk.Label(frame, text="Suite de Edicao Automatizada com IA", font=("Helvetica", 16, "bold")).pack(pady=20)
-        sf = ttk.LabelFrame(frame, text="Status dos Modulos", padding=15)
+
+        # Status das libs profissionais
+        sf = ttk.LabelFrame(frame, text="Bibliotecas Profissionais", padding=15)
         sf.pack(fill=tk.X, padx=20, pady=10)
+        ttk.Label(sf, text="[OK] moviepy" if MOVIEPY_OK else "[!] pip install moviepy",
+                  foreground="green" if MOVIEPY_OK else "orange").pack(anchor=tk.W)
+        ttk.Label(sf, text="[OK] ffmpeg-python" if FFMPEG_PYTHON_OK else "[!] pip install ffmpeg-python",
+                  foreground="green" if FFMPEG_PYTHON_OK else "orange").pack(anchor=tk.W)
+        ttk.Label(sf, text="[OK] pydub" if PYDUB_OK else "[!] pip install pydub",
+                  foreground="green" if PYDUB_OK else "orange").pack(anchor=tk.W)
+
+        sf2 = ttk.LabelFrame(frame, text="Modulos AI", padding=15)
+        sf2.pack(fill=tk.X, padx=20, pady=10)
         for nome, mod in [("Auto-Editor AI","auto_editor_ai"),("Auto-Color AI","auto_color_ai"),("Auto-Audio AI","auto_audio_ai"),("Auto-Caption AI","auto_caption_ai"),("Auto-Format AI","auto_format_ai")]:
             try:
                 __import__(mod)
-                ttk.Label(sf, text=f"[OK] {nome}", foreground="green").pack(anchor=tk.W)
+                ttk.Label(sf2, text=f"[OK] {nome}", foreground="green").pack(anchor=tk.W)
             except ImportError:
-                ttk.Label(sf, text=f"[!] {nome}", foreground="orange").pack(anchor=tk.W)
-        af = ttk.LabelFrame(frame, text="Acoes Automatizadas", padding=15)
+                ttk.Label(sf2, text=f"[!] {nome}", foreground="orange").pack(anchor=tk.W)
+
+        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
         af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="1. Edicao Automatica Completa", command=self.editar_automatico_completo).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="2. Color Grading Automatico", command=self.color_grading_automatico).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="3. Mixagem Automatica de Audio", command=self.mixagem_automatica).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="4. Legendas Automaticas + Karaoke", command=self.legendas_automaticas).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="5. Converter Todas as Plataformas", command=self.converter_todas_plataformas).pack(fill=tk.X, pady=5)
-        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=15)
-        cf.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Label(cf, text="Padrao Audio:").pack(anchor=tk.W)
-        self.auto_audio_padrao = tk.StringVar(value="youtube")
-        ttk.Combobox(cf, textvariable=self.auto_audio_padrao, values=["youtube","ebu_r128","netflix","spotify"], width=15).pack(anchor=tk.W, pady=3)
-        ttk.Label(cf, text="Estilo Legendas:").pack(anchor=tk.W)
-        self.auto_caption_estilo = tk.StringVar(value="karaoke")
-        ttk.Combobox(cf, textvariable=self.auto_caption_estilo, values=["simples","karaoke","palavra_por_palavra"], width=15).pack(anchor=tk.W, pady=3)
+        ttk.Button(af, text="Preview Rapido (moviepy)", command=self.preview_moviepy).pack(fill=tk.X, pady=5)
+        ttk.Button(af, text="Speed Ramp / Slow Motion", command=self.speed_ramp_moviepy).pack(fill=tk.X, pady=5)
+        ttk.Button(af, text="Cortar Clipe (Trim)", command=self.trim_moviepy).pack(fill=tk.X, pady=5)
+        ttk.Button(af, text="Analise de Audio (pydub)", command=self.analisar_audio_pydub).pack(fill=tk.X, pady=5)
+        ttk.Button(af, text="Normalizar Audio (pydub)", command=self.normalizar_audio_pydub).pack(fill=tk.X, pady=5)
+        ttk.Separator(af, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
+        ttk.Button(af, text="Edicao Automatica Completa", command=self.editar_automatico_completo).pack(fill=tk.X, pady=5)
+        ttk.Button(af, text="Color Grading Automatico", command=self.color_grading_automatico).pack(fill=tk.X, pady=5)
+        ttk.Button(af, text="Converter Todas as Plataformas", command=self.converter_todas_plataformas).pack(fill=tk.X, pady=5)
+
         self.auto_suite_log = scrolledtext.ScrolledText(frame, height=10, font=("Consolas", 9))
         self.auto_suite_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         self.auto_suite_log.insert(tk.END, "Aguardando acao...\n")
 
     # =========================================================
-    # ACOES
+    # ACOES moviepy / ffmpeg-python / pydub (NOVAS)
+    # =========================================================
+
+    def preview_moviepy(self):
+        """Preview funcional via moviepy (substitui placeholder do app base)"""
+        if not MOVIEPY_OK:
+            messagebox.showerror("Erro", "pip install moviepy --break-system-packages"); return
+        v = filedialog.askopenfilename(title="Video para preview", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
+        if not v: return
+        self.auto_suite_log.delete(1.0, tk.END)
+        self.auto_suite_log.insert(tk.END, f"Abrindo preview: {Path(v).name}\n")
+        self.auto_suite_log.insert(tk.END, "Feche a janela de preview para continuar.\n")
+        def t():
+            try:
+                clip = mpy.VideoFileClip(v)
+                duracao = clip.duration
+                self.auto_suite_log.insert(tk.END, f"Duracao: {duracao:.1f}s | {clip.size[0]}x{clip.size[1]} | {clip.fps}fps\n")
+                # Preview dos primeiros 30s
+                preview_clip = clip.subclip(0, min(30, duracao))
+                preview_clip.preview(fps=24)
+                clip.close()
+                self.auto_suite_log.insert(tk.END, "[OK] Preview concluido.\n")
+            except Exception as e:
+                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
+                messagebox.showerror("Erro", str(e))
+        threading.Thread(target=t, daemon=True).start()
+
+    def speed_ramp_moviepy(self):
+        """Speed ramp / slow motion via moviepy (substitui placeholder do app base)"""
+        if not MOVIEPY_OK:
+            messagebox.showerror("Erro", "pip install moviepy --break-system-packages"); return
+        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
+        if not v: return
+        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
+        if not s: return
+
+        # Diálogo de velocidade
+        dlg = tk.Toplevel(self.app.root)
+        dlg.title("Speed Ramp")
+        dlg.geometry("300x150")
+        dlg.grab_set()
+        ttk.Label(dlg, text="Velocidade (0.25 = 4x lento, 2.0 = 2x rapido):").pack(pady=10)
+        speed_var = tk.DoubleVar(value=0.5)
+        ttk.Scale(dlg, from_=0.1, to=4.0, variable=speed_var, orient=tk.HORIZONTAL, length=250).pack()
+        speed_label = ttk.Label(dlg, text="0.50x")
+        speed_label.pack()
+        def update_label(v): speed_label.config(text=f"{float(v):.2f}x")
+        ttk.Scale(dlg, from_=0.1, to=4.0, variable=speed_var, orient=tk.HORIZONTAL, length=250, command=update_label).pack()
+        resultado = [None]
+        def confirmar(): resultado[0] = speed_var.get(); dlg.destroy()
+        ttk.Button(dlg, text="Aplicar", command=confirmar).pack(pady=10)
+        self.app.root.wait_window(dlg)
+        if resultado[0] is None: return
+
+        velocidade = resultado[0]
+        self.auto_suite_log.delete(1.0, tk.END)
+        self.auto_suite_log.insert(tk.END, f"Aplicando speed {velocidade:.2f}x em {Path(v).name}...\n")
+        def t():
+            try:
+                from moviepy.video.fx.all import speedx
+                clip = mpy.VideoFileClip(v)
+                clip_modificado = clip.fx(speedx, velocidade)
+                clip_modificado.write_videofile(s, codec="libx264", audio_codec="aac",
+                                                 logger=None, verbose=False)
+                clip.close()
+                self.auto_suite_log.insert(tk.END, f"[OK] Salvo: {s}\n")
+                messagebox.showinfo("Sucesso", f"Speed ramp {velocidade:.2f}x aplicado!")
+            except Exception as e:
+                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
+                messagebox.showerror("Erro", str(e))
+        threading.Thread(target=t, daemon=True).start()
+
+    def trim_moviepy(self):
+        """Cortar clipe com precisao via moviepy"""
+        if not MOVIEPY_OK:
+            messagebox.showerror("Erro", "pip install moviepy --break-system-packages"); return
+        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
+        if not v: return
+
+        # Pega duração
+        try:
+            clip_info = mpy.VideoFileClip(v)
+            duracao = clip_info.duration
+            clip_info.close()
+        except Exception as e:
+            messagebox.showerror("Erro", f"Nao foi possivel ler o video: {e}"); return
+
+        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
+        if not s: return
+
+        dlg = tk.Toplevel(self.app.root)
+        dlg.title("Cortar Clipe")
+        dlg.geometry("350x200")
+        dlg.grab_set()
+        ttk.Label(dlg, text=f"Duracao total: {duracao:.1f}s").pack(pady=5)
+        ttk.Label(dlg, text="Inicio (segundos):").pack()
+        inicio_var = tk.StringVar(value="0")
+        ttk.Entry(dlg, textvariable=inicio_var, width=15).pack()
+        ttk.Label(dlg, text="Fim (segundos):").pack()
+        fim_var = tk.StringVar(value=f"{duracao:.1f}")
+        ttk.Entry(dlg, textvariable=fim_var, width=15).pack()
+        resultado = [None]
+        def confirmar():
+            try:
+                resultado[0] = (float(inicio_var.get()), float(fim_var.get()))
+                dlg.destroy()
+            except: messagebox.showerror("Erro", "Valores invalidos")
+        ttk.Button(dlg, text="Cortar", command=confirmar).pack(pady=10)
+        self.app.root.wait_window(dlg)
+        if resultado[0] is None: return
+
+        inicio, fim = resultado[0]
+        self.auto_suite_log.delete(1.0, tk.END)
+        self.auto_suite_log.insert(tk.END, f"Cortando {inicio:.1f}s - {fim:.1f}s de {Path(v).name}...\n")
+        def t():
+            try:
+                clip = mpy.VideoFileClip(v).subclip(inicio, fim)
+                clip.write_videofile(s, codec="libx264", audio_codec="aac",
+                                      logger=None, verbose=False)
+                clip.close()
+                self.auto_suite_log.insert(tk.END, f"[OK] Salvo: {s}\n")
+                messagebox.showinfo("Sucesso", f"Clipe cortado: {fim-inicio:.1f}s")
+            except Exception as e:
+                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
+                messagebox.showerror("Erro", str(e))
+        threading.Thread(target=t, daemon=True).start()
+
+    def analisar_audio_pydub(self):
+        """Analise de loudness e pico via pydub"""
+        if not PYDUB_OK:
+            messagebox.showerror("Erro", "pip install pydub --break-system-packages"); return
+        v = filedialog.askopenfilename(title="Audio/Video", filetypes=[("Audio/Video","*.mp3 *.wav *.mp4 *.mov *.avi *.mkv *.m4a *.flac")])
+        if not v: return
+        self.auto_suite_log.delete(1.0, tk.END)
+        self.auto_suite_log.insert(tk.END, f"Analisando audio: {Path(v).name}...\n")
+        def t():
+            try:
+                audio = AudioSegment.from_file(v)
+                duracao = len(audio) / 1000.0
+                loudness = audio.dBFS
+                pico = audio.max_dBFS
+                canais = audio.channels
+                sample_rate = audio.frame_rate
+                self.auto_suite_log.insert(tk.END, f"\n{'='*50}\n")
+                self.auto_suite_log.insert(tk.END, f"ANALISE DE AUDIO\n")
+                self.auto_suite_log.insert(tk.END, f"{'='*50}\n")
+                self.auto_suite_log.insert(tk.END, f"Arquivo:     {Path(v).name}\n")
+                self.auto_suite_log.insert(tk.END, f"Duracao:     {duracao:.1f}s\n")
+                self.auto_suite_log.insert(tk.END, f"Canais:      {canais} ({'Stereo' if canais==2 else 'Mono'})\n")
+                self.auto_suite_log.insert(tk.END, f"Sample rate: {sample_rate} Hz\n")
+                self.auto_suite_log.insert(tk.END, f"Loudness:    {loudness:.1f} dBFS\n")
+                self.auto_suite_log.insert(tk.END, f"Pico:        {pico:.1f} dBFS\n")
+                # Avaliacao
+                self.auto_suite_log.insert(tk.END, f"\nAVALIACAO:\n")
+                if loudness > -14:
+                    self.auto_suite_log.insert(tk.END, f"[!] Muito alto para web ({loudness:.1f} dBFS, ideal: -16 dBFS)\n")
+                elif loudness < -30:
+                    self.auto_suite_log.insert(tk.END, f"[!] Muito baixo ({loudness:.1f} dBFS, ideal: -16 dBFS)\n")
+                else:
+                    self.auto_suite_log.insert(tk.END, f"[OK] Nivel adequado para web ({loudness:.1f} dBFS)\n")
+                if pico > -1:
+                    self.auto_suite_log.insert(tk.END, f"[!] Risco de clipping (pico: {pico:.1f} dBFS)\n")
+                else:
+                    self.auto_suite_log.insert(tk.END, f"[OK] Sem clipping (pico: {pico:.1f} dBFS)\n")
+                self.auto_suite_log.insert(tk.END, f"{'='*50}\n")
+            except Exception as e:
+                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
+                messagebox.showerror("Erro", str(e))
+        threading.Thread(target=t, daemon=True).start()
+
+    def normalizar_audio_pydub(self):
+        """Normalizar audio para -14 dBFS (YouTube) via pydub"""
+        if not PYDUB_OK:
+            messagebox.showerror("Erro", "pip install pydub --break-system-packages"); return
+        v = filedialog.askopenfilename(title="Audio/Video", filetypes=[("Audio/Video","*.mp3 *.wav *.mp4 *.mov *.m4a *.flac")])
+        if not v: return
+        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp3",
+                                          filetypes=[("MP3","*.mp3"),("WAV","*.wav"),("MP4","*.mp4")])
+        if not s: return
+
+        target_var = tk.StringVar(value="-14")
+        dlg = tk.Toplevel(self.app.root)
+        dlg.title("Normalizar Audio")
+        dlg.geometry("280x130")
+        dlg.grab_set()
+        ttk.Label(dlg, text="Target dBFS:").pack(pady=5)
+        ttk.Combobox(dlg, textvariable=target_var,
+                     values=["-14 (YouTube)", "-16 (Podcast)", "-23 (Broadcast)", "-9 (Maximo)"],
+                     width=20).pack()
+        resultado = [None]
+        def ok(): resultado[0] = float(target_var.get().split()[0]); dlg.destroy()
+        ttk.Button(dlg, text="Normalizar", command=ok).pack(pady=10)
+        self.app.root.wait_window(dlg)
+        if resultado[0] is None: return
+
+        target_dbfs = resultado[0]
+        self.auto_suite_log.delete(1.0, tk.END)
+        self.auto_suite_log.insert(tk.END, f"Normalizando para {target_dbfs} dBFS...\n")
+        def t():
+            try:
+                audio = AudioSegment.from_file(v)
+                loudness_atual = audio.dBFS
+                diferenca = target_dbfs - loudness_atual
+                audio_normalizado = audio.apply_gain(diferenca)
+                ext = Path(s).suffix.lower()
+                fmt = "mp3" if ext == ".mp3" else "wav" if ext == ".wav" else "mp4"
+                audio_normalizado.export(s, format=fmt)
+                self.auto_suite_log.insert(tk.END, f"[OK] {loudness_atual:.1f} dBFS -> {target_dbfs} dBFS\n")
+                self.auto_suite_log.insert(tk.END, f"[OK] Salvo: {s}\n")
+                messagebox.showinfo("Sucesso", f"Audio normalizado para {target_dbfs} dBFS!")
+            except Exception as e:
+                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
+                messagebox.showerror("Erro", str(e))
+        threading.Thread(target=t, daemon=True).start()
+
+    # =========================================================
+    # ACOES originais
     # =========================================================
 
     def aplicar_lut_video(self, lut):
@@ -402,7 +651,7 @@ class V73Patch:
         def t():
             try:
                 self.luts.aplicar_lut(Path(v), lut.nome, Path(s), self.lut_intensidade.get())
-                messagebox.showinfo("Sucesso", f"LUT aplicado!")
+                messagebox.showinfo("Sucesso", "LUT aplicado!")
             except Exception as e:
                 messagebox.showerror("Erro", str(e))
         threading.Thread(target=t, daemon=True).start()
@@ -694,7 +943,7 @@ class V73Patch:
         def t():
             try:
                 from auto_caption_ai import AutoCaptionAI
-                AutoCaptionAI(self.log).gerar_legendas_auto(Path(v), Path(s), "pt", "base", self.auto_caption_estilo.get())
+                AutoCaptionAI(self.log).gerar_legendas_auto(Path(v), Path(s), "pt", "base", self.auto_caption_estilo.get() if hasattr(self, "auto_caption_estilo") else "simples")
                 messagebox.showinfo("Sucesso", "Legendas concluidas!")
             except Exception as e:
                 self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
