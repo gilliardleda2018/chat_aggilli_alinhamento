@@ -7,6 +7,8 @@
 #   - Manual (Actions > Video Builder Pro > Run workflow).
 #   - Tag v* (ex.: v7.8.0): build OFICIAL - exige assets/logo_aggilli.png e
 #     publica os instaladores numa Release do GitHub.
+#   - Tag teste-* (ex.: teste-deb-7.8): so testes + .deb, publicado como
+#     PRE-RELEASE de teste (para instalar e testar antes da versao oficial).
 # ============================================================================
 name: Video Builder Pro
 
@@ -15,7 +17,7 @@ on:
     paths: ["projetos/video-builder-pro/**", ".github/workflows/video-builder-pro.yml"]
   workflow_dispatch:
   push:
-    tags: ["v*"]
+    tags: ["v*", "teste-*"]
 
 permissions:
   contents: write
@@ -45,6 +47,7 @@ jobs:
 
   windows:
     needs: testes
+    if: ${{ !startsWith(github.ref, 'refs/tags/teste-') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -135,6 +138,23 @@ jobs:
         with:
           name: instalador-linux
           path: projetos/video-builder-pro/dist/instalador/*.deb
+
+  pre-release-teste:
+    if: startsWith(github.ref, 'refs/tags/teste-')
+    needs: linux
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: instalador-linux, path: artefatos }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artefatos/*
+          prerelease: true
+          name: "Teste ${{ github.ref_name }} (nao oficial)"
+          body: "Build de TESTE para validacao. Nao e a versao oficial."
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

@@ -54,6 +54,11 @@ O CI (`.github/workflows/video-builder-pro.yml`) passa a rodar a suite inteira e
   falhava (detectado pelo job Windows do CI). Renomeado com `git mv` (historico preservado), conteudo intacto,
   para `contexto_2026-10-23_empacotamento.md` (o conteudo e a nota de contexto do empacotamento de 23/10).
 
+### Pre-release de teste (.deb)
+- Tag `teste-*` (ex.: `teste-deb-7.8`) roda testes + Linux e publica o `.deb` como **pre-release** marcada
+  "nao oficial". Motivo: os artefatos do Actions ficam num armazenamento que exige login/zip; a release da
+  um link direto para baixar e testar. O Windows nao roda nessas tags (o .exe sera gerado depois).
+
 ### Como publicar a versao oficial
 1. Adicionar `projetos/video-builder-pro/assets/logo_aggilli.png` (commit).
 2. `git tag v7.8.0 && git push origin v7.8.0` -> o Actions gera e publica `VideoBuilderPro-Setup-7.8.exe`
