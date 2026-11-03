@@ -33,9 +33,9 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 try:
-    from ffmpeg_utils import diretorio_config, permissao_aberta, proteger
+    from ffmpeg_utils import diretorio_config, pasta_app, permissao_aberta, proteger
 except ImportError:
-    from .ffmpeg_utils import diretorio_config, permissao_aberta, proteger
+    from .ffmpeg_utils import diretorio_config, pasta_app, permissao_aberta, proteger
 
 try:
     import yt_dlp
@@ -112,7 +112,7 @@ def _detectar_browser(home: Optional[Path] = None,
 
 def localizar_cookies_txt() -> Optional[Path]:
     """cookies.txt em ~/.video_builder_pro (preferido) ou na pasta do app (legado)."""
-    for c in (diretorio_config() / "cookies.txt", Path(__file__).resolve().parent.parent / "cookies.txt"):
+    for c in (diretorio_config() / "cookies.txt", pasta_app() / "cookies.txt"):
         if c.is_file():
             return c
     return None

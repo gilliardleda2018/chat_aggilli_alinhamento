@@ -27,9 +27,11 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 try:
-    from ffmpeg_utils import executar, escapar_caminho_filtro, info_midia, executar_com_progresso
+    from ffmpeg_utils import (executar, escapar_caminho_filtro, info_midia, executar_com_progresso,
+                              pasta_app, diretorio_config)
 except ImportError:
-    from .ffmpeg_utils import executar, escapar_caminho_filtro, info_midia, executar_com_progresso
+    from .ffmpeg_utils import (executar, escapar_caminho_filtro, info_midia, executar_com_progresso,
+                               pasta_app, diretorio_config)
 
 # Valores neutros dos parametros ajustaveis (intensidade 0 => neutro)
 _NEUTRO = {"contrast": 1.0, "saturation": 1.0, "gamma": 1.0, "brightness": 0.0}
@@ -149,13 +151,12 @@ class LUTManager:
         self._carregar_luts_pasta()
 
     def _carregar_luts_pasta(self):
-        """Carrega LUTs .cube da pasta luts/ se existir"""
-        pasta_luts = Path(__file__).parent.parent / "luts"
-        if pasta_luts.exists():
-            for arquivo in pasta_luts.glob("*.cube"):
-                nome = arquivo.stem
-                self.luts_personalizadas[nome] = arquivo
-                self.log(f"LUT carregada: {nome}")
+        """Carrega LUTs .cube de <app>/luts e de ~/.video_builder_pro/luts (v7.8)"""
+        for pasta_luts in (pasta_app() / "luts", diretorio_config() / "luts"):
+            if pasta_luts.exists():
+                for arquivo in sorted(pasta_luts.glob("*.cube")):
+                    self.luts_personalizadas[arquivo.stem] = arquivo
+                    self.log(f"LUT carregada: {arquivo.stem}")
 
     def adicionar_lut_personalizada(self, nome: str, arquivo: Path):
         """Adiciona LUT .cube personalizada"""

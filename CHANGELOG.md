@@ -1,5 +1,57 @@
 # Changelog - Video Builder Pro
 
+## [v7.8 - instalador] - 2026-11-03 - Instaladores Windows (.exe) e Linux (.deb) com o logo da Aggilli
+
+Branch `feat/instalador`, empilhada sobre `feat/v7.8-diretor-ia` (PR #2).
+
+### Garantia de "sem regressao"
+| Suite | Antes | Depois |
+|---|---|---|
+| regressao + defeitos + diretor | 93/93 | 93/93 |
+| `tests/test_instalador.py` (novos, I01-I08) | - | 8/8 |
+| **Total** | 93 | **101/101** |
+O CI (`.github/workflows/video-builder-pro.yml`) passa a rodar a suite inteira em todo PR.
+
+### Decisoes (e por que)
+| Decisao | Motivo |
+|---|---|
+| Build no **GitHub Actions** (windows-latest + ubuntu-22.04) | O `.exe` do Windows precisa ser gerado no Windows; o runner faz isso de graca e de forma reproduzivel. Ubuntu 22.04 (glibc 2.35) para o binario rodar tambem no Debian 12. |
+| PyInstaller **onedir** (pasta) em vez de onefile | O onefile de 151 MB da v7.6 se descompactava a cada abertura (lento). Num instalador, a pasta abre rapido e atualiza melhor. |
+| **Inno Setup 6** no Windows | Assistente moderno em portugues, imagens do logo, atalhos, desinstalador; instala por usuario SEM pedir administrador. |
+| `.deb` com `Depends: ffmpeg` no Linux | O apt mantem o FFmpeg atualizado; no Windows (sem gerenciador padrao) o FFmpeg vai embutido (build BtbN GPL, licenca incluida em `bin/`). |
+| **faster-whisper embutido** | Sem PyTorch (~250 MB): o Diretor IA transcreve palavra a palavra logo apos instalar, sem `pip install`. Os modelos baixam na 1a transcricao. |
+| Builds de teste com monograma neutro "VB" | O logo oficial nao estava no repositorio e nao deve ser inventado. O PR valida todo o pipeline; a release oficial (tag `v*`) FALHA sem `assets/logo_aggilli.png`. |
+| `pasta_app()` em vez de `Path(__file__).parent.parent` | No app empacotado esse caminho aponta para fora do pacote (estilos, LUTs e bin sumiriam). |
+| Estilos e LUTs do usuario em `~/.video_builder_pro/` | Com o app em Program Files (somente leitura), o usuario ainda pode criar/editar estilos e LUTs. |
+| `--verificar [arquivo.json]` no launcher | O CI testa o executavel gerado E o app depois de instalado (instalacao silenciosa no Windows; `apt install` do .deb no Linux). O .exe sem console grava o resultado em arquivo. |
+
+### Adicionado
+| Arquivo | O que faz | Teste |
+|---|---|---|
+| `assets/README.md` | Onde colocar o logo oficial (`logo_aggilli.png`/`.svg`) | - |
+| `instalador/gerar_icones.py` | Logo -> `icone.ico` (16-256 px), PNG 256/512, imagens do assistente (1x e 2x DPI); `--sem-logo` para teste | I06 |
+| `instalador/versao.py` | Versao unica (VERSAO do app) + metadados do .exe ("Aggilli Intelligence") | I07 |
+| `instalador/video_builder_pro.spec` | PyInstaller (Windows/Linux), FFmpeg e pacotes opcionais | CI |
+| `instalador/instalador_windows.iss` | Inno Setup: pt-BR, logo, atalhos, desinstalador, por usuario | CI |
+| `instalador/build_deb.sh` | Pacote .deb: /opt/aggilli, comando `video-builder-pro`, menu, icone | I08 + CI |
+| `.github/workflows/video-builder-pro.yml` | testes -> exe + deb -> testes de instalacao -> Release (em tags) | - |
+
+### Alterado
+- `modules/ffmpeg_utils.py`: `pasta_app()`, `preparar_ffmpeg_embutido()` (I01, I02).
+- `modules/diretor_ia.py`: estilos do app + do usuario (I03). `luts_manager.py`: LUTs do usuario (I04).
+  `upscaler.py`, `definitive_downloader.py`: caminhos via `pasta_app()`.
+- `rodar_v78.py`: FFmpeg embutido no PATH, icone da janela, `--verificar` (I05).
+
+### Como publicar a versao oficial
+1. Adicionar `projetos/video-builder-pro/assets/logo_aggilli.png` (commit).
+2. `git tag v7.8.0 && git push origin v7.8.0` -> o Actions gera e publica `VideoBuilderPro-Setup-7.8.exe`
+   e `video-builder-pro_7.8_amd64.deb` em Releases.
+
+### Limitacoes
+- O executavel do Windows nao e assinado digitalmente: o SmartScreen mostra "Editor desconhecido" ate
+  que se use um certificado de assinatura de codigo (pago).
+- Modulos pesados (WhisperX, Demucs, GFPGAN) continuam fora do instalador (PyTorch tem varios GB).
+
 ## [v7.8] - 2026-11-03 - Sprint A: Diretor IA (edicao autonoma)
 
 Branch `feat/v7.8-diretor-ia`, empilhada sobre `fix/v7.7-correcoes-auditoria` (PR #1).

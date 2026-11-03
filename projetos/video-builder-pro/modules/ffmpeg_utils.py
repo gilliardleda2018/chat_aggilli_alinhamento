@@ -40,6 +40,33 @@ class FFmpegErro(RuntimeError):
         super().__init__(f"{Path(cmd[0]).name} falhou (codigo {returncode}): " + " | ".join(resumo))
 
 
+# ------------------------------------------------------------------ pastas do app
+def pasta_app() -> Path:
+    """Raiz do app, em codigo-fonte ou empacotado (PyInstaller).
+
+    Fonte:        .../video-builder-pro/          (modules/ fica aqui dentro)
+    Empacotado:   sys._MEIPASS (pasta _internal do PyInstaller onedir)
+    v7.8: antes cada modulo usava Path(__file__).parent.parent, que aponta
+    para fora do pacote quando o app esta instalado (estilos/luts/bin sumiam).
+    """
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).resolve().parent.parent
+
+
+def preparar_ffmpeg_embutido() -> Optional[Path]:
+    """Se o instalador trouxe FFmpeg em <app>/bin, coloca-o na frente do PATH.
+    Retorna a pasta usada (ou None se nao houver binarios embutidos)."""
+    pasta = pasta_app() / "bin"
+    nome = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    if (pasta / nome).is_file():
+        caminhos = os.environ.get("PATH", "").split(os.pathsep)
+        if str(pasta) not in caminhos:
+            os.environ["PATH"] = os.pathsep.join([str(pasta), *caminhos])
+        return pasta
+    return None
+
+
 # ------------------------------------------------------------------ logging
 _LOGGER_PRONTO = False
 

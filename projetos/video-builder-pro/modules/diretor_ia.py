@@ -37,17 +37,17 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 try:
-    from ffmpeg_utils import detectar_silencios, executar, info_midia
+    from ffmpeg_utils import detectar_silencios, diretorio_config, executar, info_midia, pasta_app
     from corte_fala import ConfigCorte, CorteFala, ResultadoCorte, extrair_json
     from transcricao import Transcricao, Transcritor
     from auto_editor import AutoEditor
 except ImportError:
-    from .ffmpeg_utils import detectar_silencios, executar, info_midia
+    from .ffmpeg_utils import detectar_silencios, diretorio_config, executar, info_midia, pasta_app
     from .corte_fala import ConfigCorte, CorteFala, ResultadoCorte, extrair_json
     from .transcricao import Transcricao, Transcritor
     from .auto_editor import AutoEditor
 
-PASTA_ESTILOS = Path(__file__).resolve().parent.parent / "estilos"
+PASTA_ESTILOS = pasta_app() / "estilos"   # estilos que vem com o app (somente leitura se instalado)
 LLM = Callable[..., str]   # llm(conteudo: str | list[bloco], system=..., max_tokens=...) -> str
 
 ESTILO_PADRAO = {
@@ -59,13 +59,21 @@ ESTILO_PADRAO = {
 
 
 # ====================================================================== estilos
-def carregar_estilos(pasta: Path = PASTA_ESTILOS) -> Dict[str, Dict]:
+def pastas_estilos() -> List[Path]:
+    """Estilos do app + estilos do usuario em ~/.video_builder_pro/estilos.
+    O usuario pode criar/editar estilos ali mesmo com o app instalado em
+    Program Files (somente leitura); um arquivo com o mesmo nome sobrescreve."""
+    return [PASTA_ESTILOS, diretorio_config() / "estilos"]
+
+
+def carregar_estilos(pasta: Optional[Path] = None) -> Dict[str, Dict]:
     estilos = {}
-    for arq in sorted(Path(pasta).glob("*.json")):
-        try:
-            estilos[arq.stem] = validar_estilo(json.loads(arq.read_text(encoding="utf-8")))
-        except (ValueError, OSError):
-            continue
+    for d in ([Path(pasta)] if pasta else pastas_estilos()):
+        for arq in sorted(Path(d).glob("*.json")):
+            try:
+                estilos[arq.stem] = validar_estilo(json.loads(arq.read_text(encoding="utf-8")))
+            except (ValueError, OSError):
+                continue
     return estilos
 
 

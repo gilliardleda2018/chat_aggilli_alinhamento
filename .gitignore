@@ -20,3 +20,10 @@ Thumbs.db
 # Renders
 render/
 output/
+
+# Build do instalador (gerados pelo CI ou localmente)
+projetos/video-builder-pro/build/
+projetos/video-builder-pro/dist/
+projetos/video-builder-pro/assets/gerados/
+projetos/video-builder-pro/instalador/ffmpeg/
+projetos/video-builder-pro/instalador/versao_windows.txt
