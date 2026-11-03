@@ -62,7 +62,7 @@ from luts_manager import LUTManager  # noqa: E402
 from transitions_gl import GLTransition, GLTransitionsEngine  # noqa: E402
 from ui_thread import UIDispatcher  # noqa: E402
 
-VERSAO = "7.7"
+VERSAO = "7.8"
 EXTS_VIDEO = (".mp4", ".mov", ".avi", ".mkv", ".mts", ".m4v", ".webm")
 
 # ============================================================
@@ -221,6 +221,11 @@ class ProjectTimeline:
     eq: Dict[str, float] = field(default_factory=dict)            # low/mid/high em dB
     transicao: str = ""                 # id do GLTransitionsEngine ("" = corte seco)
     duracao_transicao: float = 0.5
+    # v7.8: como encaixar clipes de proporcao diferente na resolucao do projeto
+    #   ajustar   = video inteiro + barras pretas (comportamento ate a v7.7, padrao)
+    #   preencher = recorta o centro para ocupar a tela toda (Reels a partir de 16:9)
+    #   desfocar  = video inteiro sobre ele mesmo ampliado e desfocado
+    enquadramento: str = "ajustar"
 
 
 @dataclass
@@ -288,7 +293,7 @@ def timeline_para_dict(tl: ProjectTimeline) -> Dict:
          "clips": [clip(c) for c in tl.clips]}
     for k in ("resolucao", "fps", "projeto_nome", "autor", "copyright", "descricao", "look",
               "look_intensidade", "ajustes_cor", "padrao_audio", "normalizar_audio", "eq",
-              "transicao", "duracao_transicao"):
+              "transicao", "duracao_transicao", "enquadramento"):
         d[k] = getattr(tl, k)
     d["resolucao"] = list(tl.resolucao)
     d["music"] = None if tl.music is None else {
@@ -310,7 +315,8 @@ def timeline_de_dict(d: Dict) -> ProjectTimeline:
             camera_angle=int(c.get("camera_angle", 0)), duracao_fonte=float(c.get("duracao_fonte", 0))))
     tl = ProjectTimeline(clips=clips)
     for k in ("fps", "projeto_nome", "autor", "copyright", "descricao", "look", "look_intensidade",
-              "ajustes_cor", "padrao_audio", "normalizar_audio", "eq", "transicao", "duracao_transicao"):
+              "ajustes_cor", "padrao_audio", "normalizar_audio", "eq", "transicao", "duracao_transicao",
+              "enquadramento"):
         if k in d:
             setattr(tl, k, d[k])
     tl.resolucao = tuple(d.get("resolucao", (1920, 1080)))
@@ -448,6 +454,13 @@ class ClaudeEngine:
         return self.config.get("claude_model", "claude-haiku-4-5-20251001")
 
     def gerar(self, prompt: str, system: str = "", max_tokens: int = 2000) -> str:
+        return self.mensagem(prompt, system=system, max_tokens=max_tokens)
+
+    def mensagem(self, conteudo: Union[str, List[Dict]], system: str = "", max_tokens: int = 2000,
+                 timeout: float = 180) -> str:
+        """v7.8: como gerar(), mas aceita lista de blocos (texto e imagens base64)
+        para a visao do Diretor/Revisor IA. Bloco de imagem:
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": ...}}"""
         if requests is None:
             raise RuntimeError("Pacote 'requests' nao instalado. Rode: pip install requests")
         chave = self.config.get_api_key("claude")
@@ -456,11 +469,11 @@ class ClaudeEngine:
         headers = {"x-api-key": chave, "anthropic-version": "2023-06-01",
                    "content-type": "application/json"}
         body = {"model": self.modelo(), "max_tokens": max_tokens,
-                "messages": [{"role": "user", "content": prompt}]}
+                "messages": [{"role": "user", "content": conteudo}]}
         if system:
             body["system"] = system
         try:
-            resp = requests.post(self.url, headers=headers, json=body, timeout=120)
+            resp = requests.post(self.url, headers=headers, json=body, timeout=timeout)
         except Exception as e:  # noqa: BLE001 - rede/timeout/DNS
             raise RuntimeError(f"Falha de conexao com a API: {e}") from e
         if resp.status_code != 200:
@@ -1157,13 +1170,25 @@ class ProfessionalRenderer:
             v.append(self.editor.speed_ramp(clip, clip.rampa))
         elif abs(clip.speed - 1.0) > 1e-6:
             v.append(f"setpts=PTS/{clip.speed}")
-        v.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
-                 f"setsar=1,fps={tl.fps},format=yuv420p")
+        enq = getattr(tl, "enquadramento", "ajustar")
+        cauda = f"setsar=1,fps={tl.fps},format=yuv420p"
+        if enq == "preencher":
+            v.append(f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},{cauda}")
+        elif enq != "desfocar":
+            v.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
+                     f"{cauda}")
         if tl.ajustes_cor:
             v.append(filtro_ajustes(tl.ajustes_cor))
         if clip.ajustes_cor:
             v.append(filtro_ajustes(clip.ajustes_cor))
-        filtros = [f"[{i}:v]{','.join(x for x in v if x != 'null')}[vb{i}]"]
+        corpo = ",".join(x for x in v if x != "null")
+        if enq == "desfocar":
+            filtros = [f"[{i}:v]{corpo},split[bgs{i}][fgs{i}]",
+                       f"[bgs{i}]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur=20:5[bgb{i}]",
+                       f"[fgs{i}]scale={w}:{h}:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2[fgz{i}]",
+                       f"[bgb{i}][fgz{i}]overlay=(W-w)/2:(H-h)/2,{cauda}[vb{i}]"]
+        else:
+            filtros = [f"[{i}:v]{corpo}[vb{i}]"]
         look = self.GRADE_PARA_LOOK.get(clip.color_grade) or tl.look
         if look:
             filtros.append(f"[vb{i}]{self.color.luts.obter_filtro_ffmpeg(look, tl.look_intensidade, rotulo=str(i))},"
@@ -1382,6 +1407,14 @@ class VideoBuilderProV7:
         ttk.Combobox(cf, textvariable=self.audio_standard, values=list(PADROES_LOUDNESS),
                      state="readonly").grid(row=3, column=1, sticky=tk.W, padx=10, pady=5)
         ttk.Label(cf, text="(usado no render e no QC)").grid(row=3, column=2, sticky=tk.W)
+
+        # v7.8: enquadramento de clipes com proporcao diferente da do projeto
+        ttk.Label(cf, text="Enquadramento:").grid(row=4, column=0, sticky=tk.W)
+        self.enquadramento_var = tk.StringVar(value="ajustar")
+        ttk.Combobox(cf, textvariable=self.enquadramento_var, values=["ajustar", "preencher", "desfocar"],
+                     state="readonly").grid(row=4, column=1, sticky=tk.W, padx=10, pady=5)
+        ttk.Label(cf, text="ajustar = barras pretas | preencher = recorta o centro | "
+                           "desfocar = fundo desfocado").grid(row=4, column=2, sticky=tk.W)
 
     def criar_aba_midia(self, nb):
         frame = ttk.Frame(nb)
@@ -1952,7 +1985,8 @@ class VideoBuilderProV7:
             ajustes_cor=aj, padrao_audio=self.audio_standard.get(),
             normalizar_audio=self.audio_normalizar.get(), eq=eq, music=musica,
             transicao=self._transicao_por_nome.get(self.transicao_var.get(), ""),
-            duracao_transicao=float(self.transicao_dur_var.get() or 0.5))
+            duracao_transicao=float(self.transicao_dur_var.get() or 0.5),
+            enquadramento=self.enquadramento_var.get() or "ajustar")
 
     def _aplicar_timeline_na_ui(self, tl: ProjectTimeline):
         self.projeto_nome.delete(0, tk.END)
@@ -1982,6 +2016,7 @@ class VideoBuilderProV7:
         nomes = {v: k for k, v in self._transicao_por_nome.items()}
         self.transicao_var.set(nomes.get(tl.transicao, self.TRANSICAO_NENHUMA))
         self.transicao_dur_var.set(tl.duracao_transicao)
+        self.enquadramento_var.set(getattr(tl, "enquadramento", "ajustar"))
         self.clips = tl.clips
         self._atualizar_listas()
 

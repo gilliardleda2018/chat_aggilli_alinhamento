@@ -1,9 +1,10 @@
-# Video Builder Pro v7.7 - modulos de IA OPCIONAIS (pesados: baixam PyTorch/modelos)
+# Video Builder Pro v7.8 - modulos de IA OPCIONAIS (pesados: baixam PyTorch/modelos)
 # Instale so o que for usar. Cada aba mostra no "Status" se esta disponivel.
 
+whisperx                # Diretor IA (v7.8) e Karaoke: transcricao palavra a palavra mais precisa (RECOMENDADO)
+stable-ts               #   alternativa ao whisperx para o Diretor IA
 openai-whisper          # Legendas AI e Legendas Automaticas
 faster-whisper          # Legendas Turbo
-whisperx                # Karaoke (timestamps por palavra)
 demucs                  # Audio Stems
 gfpgan                  # Face Restore (se der "functional_tensor": pip install "torchvision<0.17")
 insightface             # Vertical modo "smart" (deteccao de rosto)

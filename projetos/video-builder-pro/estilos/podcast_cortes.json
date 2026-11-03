@@ -1,0 +1,33 @@
+{
+  "nome": "Corte de podcast (vertical)",
+  "descricao": "Melhor momento de um episodio longo, vertical, 30-90 s, autossuficiente.",
+  "selecao": "continuo",
+  "resolucao": [
+    1080,
+    1920
+  ],
+  "fps": 30,
+  "enquadramento": "desfocar",
+  "duracao_alvo": 60,
+  "plano_min": 1.0,
+  "plano_max": 20.0,
+  "gancho_max": 3.0,
+  "transicao": "",
+  "duracao_transicao": 0.0,
+  "look": "",
+  "look_intensidade": 1.0,
+  "padrao_audio": "YouTube",
+  "corte": {
+    "remover_vicios": true,
+    "remover_repeticoes": true,
+    "cortar_pausas": true,
+    "pausa_max": 0.45,
+    "pausa_alvo": 0.2
+  },
+  "nota_minima": 7.0,
+  "regras": [
+    "Escolha UM assunto e um trecho continuo que faca sentido sozinho, sem depender do resto do episodio.",
+    "Comece pela frase mais provocativa desse trecho.",
+    "Termine numa conclusao, nunca no meio de um argumento."
+  ]
+}

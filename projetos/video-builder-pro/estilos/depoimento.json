@@ -1,0 +1,34 @@
+{
+  "nome": "Depoimento / entrevista",
+  "descricao": "Horizontal, tom humano: preserva respiros e emocao, transicoes suaves.",
+  "selecao": "melhores",
+  "resolucao": [
+    1920,
+    1080
+  ],
+  "fps": 25,
+  "enquadramento": "ajustar",
+  "duracao_alvo": 90,
+  "plano_min": 2.0,
+  "plano_max": 30.0,
+  "gancho_max": 10.0,
+  "transicao": "fade",
+  "duracao_transicao": 0.4,
+  "look": "soft_light",
+  "look_intensidade": 0.6,
+  "padrao_audio": "EBU R128",
+  "corte": {
+    "remover_vicios": true,
+    "remover_repeticoes": true,
+    "cortar_pausas": true,
+    "pausa_max": 0.9,
+    "pausa_alvo": 0.4
+  },
+  "nota_minima": 7.0,
+  "regras": [
+    "Preserve a ordem e o sentido do que a pessoa disse.",
+    "Nao tire frases do contexto.",
+    "Mantenha pausas emocionais curtas.",
+    "Abra com uma frase que apresente a pessoa ou o tema."
+  ]
+}

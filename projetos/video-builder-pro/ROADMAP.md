@@ -1,5 +1,23 @@
 # ROADMAP — Video Builder Pro
 
+## Edição profissional autônoma (definido em 03/11/2026)
+
+Base: pesquisa de repositórios em 03/11/2026 (licenças conferidas). Só código MIT/Apache/BSD/domínio público
+é incorporado; projetos AGPL/GPL (OpenMontage, RobustVideoMatting) servem apenas de referência.
+
+| Sprint | Entrega | Referências | Status |
+|---|---|---|---|
+| **A** | Diretor + Revisor (Claude), transcrição palavra a palavra, corte de vícios/repetições/pausas/retakes, estilos, enquadramento vertical | agentic-video-editor (MIT), FireRed-OpenStoryline (Apache-2.0), WhisperX (BSD-2), stable-ts (MIT) | ✅ v7.8 |
+| **B** | Limpeza de voz (DeepFilterNet), legendas animadas palavra a palavra (estilo destaque) | DeepFilterNet (Apache/MIT), captacity (MIT) | ⏳ Próxima |
+| **C** | Cortes na batida da música, PySceneDetect, corte de câmera por falante (podcast) | beat_this (MIT), PySceneDetect (BSD-3), pyannote-audio (MIT) | 🔒 |
+| **D** | Estilos aprendidos de um vídeo de referência, exportação OpenTimelineIO (DaVinci/Premiere) | OpenTimelineIO (Apache-2.0) | 🔒 |
+
+Regras de cada sprint: testes de regressão antes de alterar, novo patch/aba isolado quando possível,
+CHANGELOG com decisão + motivo + teste, PR separado.
+
+---
+
+
 Definido em 23/10/2026. Base: análise em `BIBLIOTECAS_RECOMENDADAS.md`.
 
 ```
