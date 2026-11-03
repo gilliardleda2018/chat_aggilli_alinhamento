@@ -1,5 +1,126 @@
 # Changelog - Video Builder Pro
 
+## [v7.7] - 2026-11-03 - Correcao de todos os defeitos da auditoria v7.6
+
+Origem: auditoria tecnica de 03/11/2026 sobre o commit `85c9ea4` (v7.6).
+Escopo: `modules/*.py`, `v76_patch.py`, `video_builder_pro_v7_suite.py`.
+Branch: `fix/v7.7-correcoes-auditoria`.
+
+### Como foi garantido "sem regressao"
+
+1. **Antes de alterar qualquer linha**, criei `tests/test_regressao.py`: 15 testes do
+   comportamento que JA funcionava na v7.6. Rodaram verdes no codigo original.
+2. Para cada defeito, um teste em `tests/test_defeitos.py` (IDs **D01-D49** abaixo).
+3. Resultado, com a mesma suite nos dois codigos:
+
+| Codigo | Regressao (15) | Defeitos (53 casos) | Total |
+|---|---|---|---|
+| v7.6 original (`85c9ea4`) | 15 passam | **53 falham** | 15/68 |
+| v7.7 (esta versao) | 15 passam | 53 passam | **68/68** |
+
+Midia de teste 100% sintetica (FFmpeg `lavfi`), incluindo caminhos com espaco,
+`:` , virgula, colchetes e apostrofo. Rodar: `cd projetos/video-builder-pro && python -m pytest tests`.
+A UI e testada com um stub de Tkinter (`tests/fake_tk.py`), sem display.
+
+### Decisoes de arquitetura (e por que)
+
+| Decisao | Motivo |
+|---|---|
+| Novo `modules/ffmpeg_utils.py` | Havia 3 copias de `_obter_duracao`, 2 parsers de `silencedetect`, 2 MD5, e ~40 `subprocess.run` sem checar returncode. Agora um so lugar, com `FFmpegErro` contendo o fim do stderr. |
+| Novo `modules/ui_thread.py` (`UIDispatcher`) | Tkinter nao e thread-safe; ~30 threads tocavam em widgets. Regra unica: threads usam `ui.chamar()`; a UI drena a fila a cada 50 ms. |
+| Remover moviepy, pydub e ffmpeg-python | moviepy 2.x removeu `moviepy.editor`/`subclip`/`speedx`; pydub depende de `audioop`, removido no Python 3.13. Tudo foi refeito em FFmpeg puro: menos dependencias, mesmo resultado. |
+| Implementar os 8 modulos ausentes | O patch importava `upscaler`, `stems_separator`, `face_restore`, `auto_*_ai`, que nao existiam no repositorio: 3 abas e 5 botoes nunca funcionaram. |
+| Manter nomes publicos | `aplicar_patch`, `V73Patch`, `_obter_duracao`, `queimar_legendas_no_video` etc. continuam existindo: o `rodar_v76.py` local segue funcionando. |
+| Base + patch mantidos (sem consolidar) | A consolidacao e uma mudanca estrutural separada (ROADMAP v7.8). Misturar com correcoes dificultaria revisar e reverter. |
+
+### Corrigido - modules/
+
+| ID | Arquivo | Defeito | Causa | Correcao |
+|---|---|---|---|---|
+| D01 | auto_editor.py | "Detectar Cenas" quebrava (`'float' object has no attribute 'get'`) | Modulo devolve `List[float]`; a UI tratava como dicts | Novo `detectar_cenas()` -> `[{inicio, fim, duracao}]`; `detectar_cortes_cena()` mantido |
+| - | auto_editor.py | Remover silencios cortava no keyframe (trechos imprecisos/congelados) | `-ss` depois de `-i` com `-c copy` | Corte unico `trim/atrim + concat` com reencode (preciso ao frame) |
+| - | auto_editor.py | Falhas de FFmpeg silenciosas; video sem audio quebrava | returncode ignorado | `executar()` com erro claro; sem audio = copia |
+| - | auto_editor.py | `aplicar_edicao_automatica` usava filtro inexistente `abremoveloud` | - | Reusa o corte por trechos |
+| D02 | vertical_converter.py | Conversao vertical quebrava (`'str' object has no attribute 'value'`) | UI passava `"smart"`; blur caia em `resolucao_saida` | Aceita `CropMode` ou `str`; opcionais so por palavra-chave |
+| D03 | vertical_converter.py | Blur de fundo invisivel | Frente recortada 9:16 e escalada para tela cheia cobria o fundo | Video inteiro centralizado sobre fundo desfocado |
+| D04 | vertical_converter.py | Video sem audio falhava | `-c:a aac` sem stream | Audio mapeado so se existir |
+| - | vertical_converter.py | Face tracking escolhia a face errada; exigia GPU | `bbox[2]*bbox[3]` nao e area; `ctx_id=0` fixo | Area real; CPU quando nao ha CUDA |
+| D05 | subtitles_ai.py | "Queimar legendas" quebrava; caminhos `C:\...` ou com apostrofo quebravam o filtro | Metodo `queimar_legendas` nao existia; caminho sem escape | Alias criado; `escapar_caminho_filtro()` (2 niveis de escape do FFmpeg) |
+| D06 | subtitles_ai.py | SRT gerado se perdia | Gravado no temp (apagado no `__del__`) com nome fixo | Parametro `saida`; padrao ao lado do video |
+| D07 | luts_manager.py | Intensidade < 1 INVERTIA o look (contraste 1,15 x 0,5 = 0,575) | Multiplicava o parametro pelo slider | Interpola do neutro: `n + (v - n) * i`; colorbalance, vignette e unsharp tambem |
+| D08 | luts_manager.py | `.cube` com intensidade parcial ou caminho com `:`/apostrofo falhava | `blend` sem formato comum; caminho sem escape | `filter_complex` com `format=gbrp`; escape; rotulos unicos por clipe |
+| D09-D10 | transitions_gl.py | 42 das 46 transicoes falhavam (`No such filter: 'st(1'`) | Expressao solta, fora de `xfade=transition=custom` | 25 mascaras reais + 17 mapeadas para a nativa mais proxima, marcadas "(aprox.)" |
+| D11 | transitions_gl.py | Easing invertido | No xfade, `P` vai de 1 a 0 (verificado em teste) | Curvas usam `1-P` |
+| D09 | transitions_gl.py | Clipes de formatos diferentes abortavam; audio descartado | Sem normalizacao; sem `-map` de audio | Normalizacao no grafo; `acrossfade`; silencio sintetico para clipe mudo |
+| D12 | transitions_gl.py | 3 ou mais clipes com offset errado | Offset usava so a duracao do clipe i | Duracao acumulada; validacao de transicao maior que o clipe |
+| D13 | gpu_encoder.py | NVIDIA "detectada" sem placa (reproduzido) | `ffmpeg -encoders` lista o que foi compilado, nao o hardware | Encode real de 1 quadro antes de marcar disponivel; parse do nome corrigido |
+| D14 | gpu_encoder.py | Qualidade invertida ("Rapido" 28 Mbps > "Qualidade" 18 Mbps); filtros quebravam com CUDA | CRF usado como bitrate; `-hwaccel_output_format cuda` | `-cq`/`-global_quality`/`-qp`; quadros na RAM; AMF com `-quality` |
+| D15 | definitive_downloader.py | Aba Download morta no Windows, com mensagem falsa "pip install yt-dlp" | `Path("/home").iterdir()` no `__init__` | Perfis de navegador por sistema (Windows/macOS/Linux/Flatpak/Snap) |
+| D16 | definitive_downloader.py | **Seguranca:** como root, usava os cookies do primeiro usuario de `/home/*` | Varredura de todos os homes | So o home do usuario real (`SUDO_USER` via `pwd`) |
+| D17 | definitive_downloader.py | **Seguranca:** `cookies.txt` em 644 (legivel por todos) | - | Ajusta para 600 com aviso; local preferido `~/.video_builder_pro/cookies.txt`; `cookies.txt` tem prioridade sobre o navegador |
+| - | definitive_downloader.py | Retornava o arquivo intermediario (`.f137.mp4`); progresso invisivel | Hook `finished` e anterior ao merge | `requested_downloads[].filepath`; logger do yt-dlp na UI; nova tentativa sem cookies do navegador |
+| D18 | upscaler.py (novo) | Aba Upscale nunca funcionou | Arquivo inexistente | Real-ESRGAN ncnn-vulkan (IA) com fallback classico (FFmpeg lanczos) |
+| D19-D20 | upscaler.py | - | - | Testado: modo classico real + pipeline IA com binario simulado |
+| D21 | stems_separator.py (novo) | Aba Stems nunca funcionou | Arquivo inexistente | Demucs CLI (2 ou 4 stems) |
+| D22 | face_restore.py (novo) | Aba Face Restore nunca funcionou | Arquivo inexistente | GFPGAN quadro a quadro via pipe FFmpeg; detecta e explica o erro `basicsr`/`torchvision` |
+| D23 | auto_suite.py (novo) | 5 botoes da Auto-Edit Suite falhavam | `auto_*_ai` inexistentes | Edicao automatica (com transicoes), cor automatica (signalstats), mixagem (EBU R128), legendas, 4 formatos de plataforma |
+
+### Corrigido - video_builder_pro_v7_suite.py (base)
+
+| ID | Defeito | Correcao |
+|---|---|---|
+| D24 | Render de clipes heterogeneos dessincronizado (video 7,24 s x audio 3,04 s) | Cada clipe normalizado (scale/pad/fps/aresample) + filtro `concat` |
+| D25 | In/out ignorados (fim=10 fixo); velocidade ignorada | `-ss/-t` por clipe; `setpts` + cadeia `atempo` |
+| D26 | Proxies gerados e descartados em DRAFT/FAST (tempo dobrado) | Removido do render; proxies so para preview |
+| D27 | Padrao de audio ignorado; `loudnorm` deixava 0,1 s de cauda | Loudnorm em 2 passadas para o padrao escolhido + `atrim` na duracao original |
+| D28 | Aba Cor (LUT/sliders), aba Audio (EQ/ducking) e transicoes nao chegavam ao render | Look/LUT, `eq`, EQ de 3 bandas, trilha com `sidechaincompress` e xfade no grafo |
+| D29 | `speed_ramp` devolvia `setpts=0.5*PTS` fixo | `setpts` por trechos (velocidade constante por segmento) |
+| D30 | QC aprovava video SEM audio | Sem audio ou audio mudo = reprovado |
+| D31 | True peak, dropped e black frames eram constantes | Medidos: `loudnorm` (TP/LRA), `blackdetect`, `freezedetect`, contagem de pacotes, bitrate por segundo |
+| D32 | Alvo fixo em -23: videos para YouTube (-14) sempre reprovados | Alvo e true peak seguem o padrao do projeto (+/- 1 LU) |
+| D33 | `gerar_relatorio_pdf` era `pass` | PDF gerado sem dependencias (ou .txt) |
+| D34 | Luminosidade fixa em 45 IRE; match de cameras fixo | `signalstats` real; match por Y/U/V/saturacao medios |
+| D35 | Sincronia multicam = 0,0 fixo; duracao 10 s fixa | Correlacao cruzada do envelope de audio (resolucao de 10 ms) |
+| D36 | Ripple mexia no material de origem; slide era no-op | Ripple sobre a posicao na timeline (clipe ou intervalo); slide ajusta os vizinhos |
+| D37 | EDL sem in/out; `pathurl` invalida | in/out/start/end, taxa da sequencia, URI `file:///` |
+| D38 | Fila nunca renderizava | `processar_fila` renderiza cada projeto + botao na UI |
+| D39 | **Seguranca:** chave em base64 num arquivo 644 | Cofre do sistema (`keyring`) quando disponivel; senao arquivo 600 em diretorio 700, com gravacao atomica |
+| D40 | Sem logging em arquivo | `~/.video_builder_pro/logs/video_builder.log` rotativo (5 x 1 MB) |
+| D41 | Threads escreviam nos widgets | `UIDispatcher` |
+| D42 | Abrir/Salvar projeto eram placeholders | JSON `.vbp.json` com clipes, in/out, velocidade, look, audio, trilha e transicao |
+| D43 | Escolhas da UI nao chegavam ao render | `_montar_timeline()` le todas as abas |
+| D44 | Chave salva carregada de volta no campo da tela | Campo vazio + rotulo "salva em: cofre/arquivo 600" |
+| - | Timeline: canvas vazio e 4 botoes placeholder | Lista de clipes, In/Out, velocidade, speed ramp, subir/descer, ripple, multicam, preview (ffplay) |
+
+### Corrigido - v76_patch.py
+
+| ID | Defeito | Correcao |
+|---|---|---|
+| D45 | Detectar Cenas quebrava | Usa `detectar_cenas()` |
+| D46 | Vertical e Queimar legendas quebravam | Chamadas corretas |
+| D47 | WhisperX sempre "cuda" (quebrava em CPU) | CUDA via `torch.cuda.is_available()`; `compute_type` int8 na CPU; palavras sem alinhamento puladas; `{}` escapados no ASS |
+| D48 | Preview, Speed, Trim, Analise e Normalizacao dependiam de moviepy/pydub (quebrados no 3.13); a normalizacao descartava o video | FFmpeg puro; EBU R128 (LUFS) com video copiado |
+| D49 | `mixagem_automatica` usava `self.auto_audio_padrao` inexistente e nao tinha botao; Transicoes GL so listavam nomes | Botoes e combos ligados; transicao aplicavel entre 2 clipes ou no projeto |
+| - | Slider duplicado no dialogo de Speed Ramp | Dialogo simples |
+
+### Adicionado
+- `rodar_v77.py`: launcher com checagem de FFmpeg e erro de inicializacao em janela e no log.
+- `requirements.txt` (principal) e `requirements-ia.txt` (opcionais pesados).
+- `tests/`: 68 testes automatizados.
+
+### Removido
+- Dependencias moviepy, pydub e ffmpeg-python.
+- `*.log` versionados (`git rm --cached`): o `.gitignore` ja os excluia, e um deles expunha um caminho com nome de usuario do Windows.
+
+### Limitacoes conhecidas (nao sao regressoes)
+- **Transicoes de distorcao** (Cube, Page Curl, Swirl 3D...): o `xfade` do FFmpeg so escolhe pixel de A ou B, nao desloca imagem. Por isso usam a transicao nativa mais proxima e aparecem como "(aprox.)".
+- **Speed ramp** fica sem audio no trecho com rampa, porque o `atempo` nao varia no tempo. A velocidade constante mantem o audio.
+- **Campos por clipe** `transicao_entrada/saida` e `movimento` existem no modelo, mas ainda nao tem UI. A transicao e unica para o projeto.
+- **Testados com binarios/modulos simulados**, nao com os modelos reais (ausentes no ambiente de teste): Real-ESRGAN, Demucs, GFPGAN, Whisper, faster-whisper, WhisperX, yt-dlp com rede. Validar com videos reais antes do uso em producao.
+- **Binario PyInstaller nao reconstruido.** Para rebuild:
+  `pyinstaller --onefile --windowed --paths modules --hidden-import upscaler --hidden-import stems_separator --hidden-import face_restore --hidden-import definitive_downloader rodar_v77.py`
+  (os 4 modulos sao carregados dinamicamente pelo patch e precisam do `--hidden-import`; FFmpeg nao vai dentro do binario).
+
 ## [v7.5] - 2026-10-23 (FINAL)
 
 ### Adicionado

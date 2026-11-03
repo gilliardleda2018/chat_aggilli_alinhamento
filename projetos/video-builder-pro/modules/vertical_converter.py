@@ -1,18 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VERTICAL CONVERTER - Video Builder Pro v7.3
+VERTICAL CONVERTER - Video Builder Pro v7.7
 Converte videos horizontais para vertical (9:16) com face tracking
 Baseado em: github.com/algometrix/vertical_video_convertor
+
+Correcoes v7.7 (ver CHANGELOG.md, secao "vertical_converter.py"):
+  - converter() exigia CropMode e a UI passava a string "smart"
+    -> AttributeError 'str' object has no attribute 'value'. Agora aceita
+    CropMode ou str, e os parametros opcionais sao keyword-only
+    (a UI passava o blur na posicao de resolucao_saida).
+  - Modo blur: o primeiro plano era recortado em 9:16 e escalado para a
+    tela inteira, cobrindo 100% do fundo (blur invisivel). Agora o video
+    inteiro fica centralizado sobre o fundo desfocado (estilo TikTok/Reels).
+  - Video sem audio quebrava no '-c:a aac' com mapeamento implicito: tratado.
+  - Face tracking: f.bbox[2]*f.bbox[3] nao e area (bbox e x1,y1,x2,y2);
+    a maior face agora e escolhida pela area real. ctx_id=-1 (CPU) quando
+    nao ha CUDA, em vez de assumir GPU.
+  - ffprobe/ffmpeg com returncode verificado.
 """
 
-import subprocess
+import shutil
 import tempfile
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
-import json
+from pathlib import Path
+from typing import Optional, Tuple, Union
+
+try:
+    from ffmpeg_utils import executar, info_midia, executar_com_progresso
+except ImportError:
+    from .ffmpeg_utils import executar, info_midia, executar_com_progresso
 
 
 class CropMode(Enum):
@@ -60,13 +78,21 @@ class VerticalConverter:
             return False
 
     def converter(self, video: Path, saida: Path,
-                  modo: CropMode = CropMode.CENTER,
+                  modo: Union[CropMode, str] = CropMode.CENTER, *,
                   resolucao_saida: Tuple[int, int] = (1080, 1920),
                   adicionar_blur_fundo: bool = True,
                   regiao_manual: Optional[CropRegion] = None) -> Path:
-        """Converte video para vertical"""
+        """Converte video para vertical.
 
-        self.log(f"Convertendo para vertical ({modo.value})...")
+        blur=True  -> video inteiro centralizado sobre fundo desfocado.
+        blur=False -> recorte 9:16 conforme o modo (center/top/bottom/smart/manual).
+        """
+        if isinstance(modo, str):
+            modo = CropMode(modo.strip().lower())
+        if modo == CropMode.MANUAL and regiao_manual is None:
+            raise ValueError("Modo manual exige regiao_manual (x, y, largura, altura).")
+
+        self.log(f"Convertendo para vertical ({modo.value}, blur={adicionar_blur_fundo})...")
 
         # Obtem resolucao original
         largura_orig, altura_orig = self._obter_resolucao(video)
@@ -92,37 +118,23 @@ class VerticalConverter:
         else:
             filtro = self._gerar_filtro_simples(crop, resolucao_saida)
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video),
-            "-vf", filtro,
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            str(saida)
-        ]
+        info = info_midia(Path(video))
+        cmd = ["ffmpeg", "-y", "-i", str(video), "-filter_complex", filtro + "[vout]",
+               "-map", "[vout]", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+               "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+        cmd += ["-map", "0:a:0", "-c:a", "aac", "-b:a", "192k"] if info["tem_audio"] else ["-an"]
 
         self.log("Renderizando video vertical...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            self.log(f"Erro: {result.stderr[:300]}")
-            raise Exception(f"Falha na conversao: {result.stderr[:200]}")
-
+        executar_com_progresso(cmd + [str(saida)], self.log, info["duracao"])
         self.log(f"Conversao concluida: {saida}")
         return saida
 
     def _obter_resolucao(self, video: Path) -> Tuple[int, int]:
         """Obtem resolucao do video"""
-        cmd = [
-            "ffprobe", "-v", "quiet",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0", str(video)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        largura, altura = map(int, result.stdout.strip().split(','))
-        return largura, altura
+        info = info_midia(Path(video))
+        if not info["tem_video"]:
+            raise ValueError(f"'{Path(video).name}' nao tem trilha de video.")
+        return info["width"], info["height"]
 
     def _calcular_crop_centro(self, largura_orig: int, altura_orig: int,
                                resolucao_saida: Tuple[int, int]) -> CropRegion:
@@ -195,9 +207,15 @@ class VerticalConverter:
 
             self.log("Analisando faces para crop inteligente...")
 
-            # Carrega modelo de deteccao facial
-            app = insightface.app.FaceAnalysis()
-            app.prepare(ctx_id=0, det_size=(640, 640))
+            # Carrega modelo de deteccao facial (GPU se houver CUDA, senao CPU)
+            from insightface.app import FaceAnalysis
+            try:
+                import onnxruntime
+                ctx = 0 if "CUDAExecutionProvider" in onnxruntime.get_available_providers() else -1
+            except ImportError:
+                ctx = -1
+            app = FaceAnalysis(allowed_modules=["detection"])
+            app.prepare(ctx_id=ctx, det_size=(640, 640))
 
             # Analisa alguns frames
             cap = cv2.VideoCapture(str(video))
@@ -215,7 +233,7 @@ class VerticalConverter:
                     faces = app.get(frame)
                     if faces:
                         # Pega a maior face
-                        face = max(faces, key=lambda f: f.bbox[2] * f.bbox[3])
+                        face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
                         x1, y1, x2, y2 = map(int, face.bbox)
                         faces_detectadas.append({
                             'centro_x': (x1 + x2) // 2,
@@ -259,31 +277,23 @@ class VerticalConverter:
 
     def _gerar_filtro_simples(self, crop: CropRegion,
                                resolucao_saida: Tuple[int, int]) -> str:
-        """Gera filtro simples de crop + scale"""
-
-        filtro = (
-            f"crop={crop.largura}:{crop.altura}:{crop.x}:{crop.y},"
-            f"scale={resolucao_saida[0]}:{resolucao_saida[1]}"
-        )
-
-        return filtro
+        """Gera filtro simples de crop + scale (rotulo de saida e adicionado depois)"""
+        return (f"[0:v]crop={crop.largura}:{crop.altura}:{crop.x}:{crop.y},"
+                f"scale={resolucao_saida[0]}:{resolucao_saida[1]},setsar=1")
 
     def _gerar_filtro_com_blur(self, crop: CropRegion,
                                 resolucao_saida: Tuple[int, int],
                                 largura_orig: int, altura_orig: int) -> str:
-        """Gera filtro com blur no fundo (estilo TikTok)"""
-
-        # Video embaixo (blur), video em cima (crop)
-        filtro = (
-            f"[0:v]split[bg][fg];"
-            f"[bg]scale={resolucao_saida[0]}:{resolucao_saida[1]},"
-            f"boxblur=20:5[bg_blur];"
-            f"[fg]crop={crop.largura}:{crop.altura}:{crop.x}:{crop.y},"
-            f"scale={resolucao_saida[0]}:{resolucao_saida[1]}[fg_scaled];"
-            f"[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2"
-        )
-
-        return filtro
+        """Fundo: video preenchendo 9:16 e desfocado. Frente: video INTEIRO
+        reduzido para caber na largura, centralizado (o fundo fica visivel
+        acima e abaixo)."""
+        w, h = resolucao_saida
+        return (f"[0:v]split[bg][fg];"
+                f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
+                f"boxblur=20:5[bg_blur];"
+                f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                f"scale=trunc(iw/2)*2:trunc(ih/2)*2[fg_scaled];"
+                f"[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2,setsar=1")
 
     def criar_preview_crop(self, video: Path, crop: CropRegion,
                            saida: Path, tempo: float = 5.0) -> Path:
@@ -297,7 +307,6 @@ class VerticalConverter:
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video),
-            "-ss", "0",
             "-t", str(tempo),
             "-vf", filtro,
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
@@ -305,12 +314,11 @@ class VerticalConverter:
             str(saida)
         ]
 
-        subprocess.run(cmd, capture_output=True)
+        executar(cmd, self.log)
         return saida
 
+    def cleanup(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
     def __del__(self):
-        try:
-            import shutil
-            shutil.rmtree(self.temp_dir)
-        except:
-            pass
+        self.cleanup()

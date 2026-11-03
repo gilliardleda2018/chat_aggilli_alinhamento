@@ -1,48 +1,80 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+PATCH v7.6 -> v7.7 - Video Builder Pro
+Adiciona 12 abas ao app base (total 20). Uso: aplicar_patch(app).
+
+Correcoes v7.7 (detalhes em CHANGELOG.md, secao "v76_patch.py"):
+  CRASHES
+  - Detectar Cenas: c.get('inicio') sobre float -> AttributeError. Agora usa
+    AutoEditor.detectar_cenas() que devolve dicts.
+  - Vertical: string "smart" no lugar de CropMode e o blur caia na posicao
+    de resolucao_saida -> AttributeError. Agora por palavra-chave.
+  - Queimar legendas: metodo inexistente (queimar_legendas). Corrigido no
+    modulo (alias) e aqui.
+  - WhisperX: "cuda" sempre (GPUInfo e sempre truthy) -> falha em CPU.
+    Agora detecta CUDA via torch e usa compute_type int8 na CPU.
+  - mixagem_automatica usava self.auto_audio_padrao inexistente e nao
+    tinha botao; legendas_automaticas tambem nao tinha botao. Ambos ligados.
+  - upscaler/stems_separator/face_restore/auto_*_ai nao existiam: criados
+    em modules/ (upscaler.py, stems_separator.py, face_restore.py,
+    auto_suite.py).
+  COMPATIBILIDADE (Python 3.13)
+  - moviepy 2.x removeu moviepy.editor/subclip/speedx e o pydub depende do
+    modulo audioop (removido no 3.13). Preview, speed, trim, analise e
+    normalizacao agora usam FFmpeg direto: zero dependencias extras.
+  - "Normalizar Audio (pydub)" usava dBFS (RMS) rotulado como YouTube e, ao
+    salvar .mp4, DESCARTAVA o video. Agora EBU R128 (LUFS) 2 passadas,
+    video copiado.
+  UI
+  - Nenhuma thread toca em widget (app.ui.chamar).
+  - Transicoes GL: a aba so listava nomes; agora aplica entre 2 clipes
+    (com easing) ou define a transicao do projeto.
+  - Speed ramp: dialogo tinha dois sliders iguais (o primeiro sem rotulo).
+  - Status das abas reflete o que esta realmente instalado.
+"""
+
+import importlib.util
+import shutil
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent / "modules"))
 
-from transitions_gl import GLTransitionsEngine
-from luts_manager import LUTManager
-from auto_editor import AutoEditor
-from subtitles_ai import SubtitlesAI
-from vertical_converter import VerticalConverter
-from gpu_encoder import GPUEncoder
+sys.path.insert(0, str(Path(__file__).resolve().parent / "modules"))
 
-import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, messagebox
-import threading
+import tkinter as tk  # noqa: E402
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk  # noqa: E402
 
-# --- Bibliotecas profissionais opcionais ---
-try:
-    import moviepy.editor as mpy
-    MOVIEPY_OK = True
-except Exception:
-    MOVIEPY_OK = False
+from auto_editor import AutoEditor  # noqa: E402
+from auto_suite import AutoAudioAI, AutoCaptionAI, AutoColorAI, AutoEditorAI, AutoFormatAI  # noqa: E402
+from ffmpeg_utils import (PADROES_LOUDNESS, abrir_no_player, binario, cadeia_atempo,  # noqa: E402
+                          executar, executar_com_progresso, info_midia, medir_loudness,
+                          normalizar_loudness, padrao_loudness)
+from gpu_encoder import GPUEncoder, GPUType  # noqa: E402
+from luts_manager import LUTManager  # noqa: E402
+from subtitles_ai import SubtitlesAI  # noqa: E402
+from transitions_gl import EasingType, GLTransition, GLTransitionsEngine  # noqa: E402
+from vertical_converter import CropMode, VerticalConverter  # noqa: E402
 
-try:
-    import ffmpeg as ffmpeg_python
-    FFMPEG_PYTHON_OK = True
-except Exception:
-    FFMPEG_PYTHON_OK = False
-
-try:
-    from pydub import AudioSegment
-    from pydub import effects as pydub_effects
-    PYDUB_OK = True
-except Exception:
-    PYDUB_OK = False
+VIDEOS = [("Videos", "*.mp4 *.mov *.avi *.mkv *.m4v *.webm")]
+MIDIA = [("Audio/Video", "*.mp3 *.wav *.m4a *.flac *.aac *.ogg *.mp4 *.mov *.avi *.mkv *.m4v *.webm")]
+MP4 = [("MP4", "*.mp4")]
 
 
 def aplicar_patch(app):
-    patch = V73Patch(app)
-    return patch
+    return V73Patch(app)
+
+
+def _instalado(modulo: str) -> bool:
+    return importlib.util.find_spec(modulo) is not None
 
 
 class V73Patch:
+    """Nome mantido por compatibilidade com launchers da v7.3-v7.6."""
+
     def __init__(self, app):
         self.app = app
         self.log = app.log
+        self.ui = app.ui
 
         self.gl_trans = GLTransitionsEngine(self.log)
         self.luts = LUTManager(self.log)
@@ -51,54 +83,26 @@ class V73Patch:
         self.vertical = VerticalConverter(self.log)
         self.gpu = GPUEncoder(self.log)
 
-        # Reportar bibliotecas profissionais
-        if MOVIEPY_OK:
-            self.log("[OK] moviepy disponivel (preview + speed ramp)")
-        else:
-            self.log("[AVISO] moviepy nao instalado: pip install moviepy")
+        self.log(f"[{'OK' if binario('ffmpeg') else 'ERRO'}] ffmpeg  "
+                 f"[{'OK' if binario('ffplay') else 'AVISO'}] ffplay (preview)")
 
-        if FFMPEG_PYTHON_OK:
-            self.log("[OK] ffmpeg-python disponivel (render avancado)")
-        else:
-            self.log("[AVISO] ffmpeg-python nao instalado: pip install ffmpeg-python")
-
-        if PYDUB_OK:
-            self.log("[OK] pydub disponivel (analise de audio)")
-        else:
-            self.log("[AVISO] pydub nao instalado: pip install pydub")
-
-        try:
-            from upscaler import VideoUpscaler
-            self.upscaler = VideoUpscaler(self.log)
-        except Exception as e:
-            self.upscaler = None
-            self.log(f"[AVISO] Upscaler nao disponivel: {e}")
-
-        try:
-            from stems_separator import StemSeparator
-            self.stems = StemSeparator(self.log)
-        except Exception as e:
-            self.stems = None
-            self.log(f"[AVISO] StemSeparator nao disponivel: {e}")
-
-        try:
-            from definitive_downloader import DefinitiveDownloader
-            self.downloader = DefinitiveDownloader(self.log)
-        except Exception as e:
-            self.downloader = None
-            self.log(f"[AVISO] DefinitiveDownloader nao disponivel: {e}")
-
-        try:
-            from face_restore import FaceRestorer
-            self.face_restore = FaceRestorer(self.log)
-        except Exception as e:
-            self.face_restore = None
-            self.log(f"[AVISO] FaceRestorer nao disponivel: {e}")
+        self.upscaler = self._carregar("upscaler", "VideoUpscaler")
+        self.stems = self._carregar("stems_separator", "StemSeparator")
+        self.downloader = self._carregar("definitive_downloader", "DefinitiveDownloader")
+        self.face_restore = self._carregar("face_restore", "FaceRestorer")
 
         self.adicionar_abas()
         self.log("=" * 60)
-        self.log("PATCH v7.6 APLICADO COM SUCESSO! (20 abas)")
+        self.log(f"PATCH v7.7 APLICADO: {len(self.app.nb.tabs())} abas")
         self.log("=" * 60)
+
+    def _carregar(self, modulo, classe):
+        try:
+            mod = __import__(modulo)
+            return getattr(mod, classe)(self.log)
+        except Exception as e:  # noqa: BLE001 - modulo opcional
+            self.log(f"[AVISO] {classe} indisponivel: {e}")
+            return None
 
     def _ok(self, obj, nome):
         if obj is None:
@@ -106,9 +110,64 @@ class V73Patch:
         attr = getattr(obj, nome, False)
         try:
             return attr() if callable(attr) else bool(attr)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
+    # ============================================================ helpers
+    def _escrever(self, widget, msg: str):
+        """Escreve num ScrolledText de qualquer thread."""
+        def _ui():
+            widget.insert(tk.END, f"{msg}\n")
+            widget.see(tk.END)
+        self.ui.chamar(_ui)
+
+    def _tarefa(self, widget, titulo: str, fn, sucesso=None, limpar: bool = False):
+        """Roda fn(log) em segundo plano. log escreve no widget + log geral."""
+        if limpar:
+            widget.delete(1.0, tk.END)
+
+        def log(msg):
+            self.log(msg)
+            self._escrever(widget, msg)
+
+        def alvo():
+            resultado = fn(log)
+            texto = sucesso(resultado) if callable(sucesso) else (sucesso or "Concluido!")
+            log(f"[OK] {texto}")
+            self.ui.chamar(messagebox.showinfo, titulo, texto)
+
+        def erro(e):
+            self._escrever(widget, f"[ERRO] {e}")
+            messagebox.showerror(titulo, str(e))
+        log(f"{titulo}: iniciando...")
+        return self.ui.em_segundo_plano(alvo, ao_erro=erro, nome=titulo)
+
+    @staticmethod
+    def _abrir(titulo="Video", tipos=VIDEOS):
+        return filedialog.askopenfilename(title=titulo, filetypes=tipos)
+
+    @staticmethod
+    def _salvar(titulo="Salvar", ext=".mp4", tipos=MP4):
+        return filedialog.asksaveasfilename(title=titulo, defaultextension=ext, filetypes=tipos)
+
+    def _status(self, pai, ok: bool, texto_ok: str, texto_falta: str):
+        ttk.Label(pai, text=f"[OK] {texto_ok}" if ok else f"[!] {texto_falta}",
+                  foreground="green" if ok else "orange").pack(anchor=tk.W)
+
+    def _log_widget(self, frame, altura=10, inicial="Aguardando acao...\n"):
+        w = scrolledtext.ScrolledText(frame, height=altura, font=("Consolas", 9))
+        w.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        w.insert(tk.END, inicial)
+        return w
+
+    def _cuda(self) -> bool:
+        try:
+            import torch
+            return bool(torch.cuda.is_available())
+        except Exception:  # noqa: BLE001 - torch ausente/quebrado
+            return self.gpu.obter_melhor_gpu().tipo == GPUType.NVIDIA
+
+    # ============================================================ abas
     def adicionar_abas(self):
         nb = self.app.nb
         self.criar_aba_transicoes_gl(nb)
@@ -127,180 +186,173 @@ class V73Patch:
     def log_auto(self, msg):
         self.log(msg)
         if hasattr(self, "auto_log"):
-            self.auto_log.insert(tk.END, f"{msg}\n")
-            self.auto_log.see(tk.END)
-            self.app.root.update_idletasks()
-
-    # =========================================================
-    # NOVA ABA: EDITOR PROFISSIONAL (moviepy + ffmpeg-python)
-    # Substitui os placeholders preview/speed_ramp do app base
-    # =========================================================
+            self._escrever(self.auto_log, msg)
 
     def criar_aba_transicoes_gl(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Transicoes GL  ")
-        ttk.Label(frame, text="Transicoes GL Avancadas (46+)", font=("Helvetica", 16, "bold")).pack(pady=20)
-        lf = ttk.LabelFrame(frame, text="Transicoes Disponiveis", padding=15)
-        lf.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        lista_t = self.gl_trans.listar_transicoes()
+        ttk.Label(frame, text=f"Transicoes ({len(lista_t)})", font=("Helvetica", 16, "bold")).pack(pady=12)
+        ttk.Label(frame, text="Mascaras suportam easing. As marcadas '(aprox.)' usam a transicao nativa "
+                              "do FFmpeg mais proxima (o xfade nao distorce imagem).").pack()
+        lf = ttk.LabelFrame(frame, text="Transicoes Disponiveis", padding=10)
+        lf.pack(fill=tk.BOTH, expand=True, padx=20, pady=6)
         sb = ttk.Scrollbar(lf)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
-        lista = tk.Listbox(lf, yscrollcommand=sb.set, font=("Consolas", 10))
-        for t in self.gl_trans.listar_transicoes():
-            lista.insert(tk.END, t.get("nome", t.get("id", "?")))
-        lista.pack(fill=tk.BOTH, expand=True)
-        sb.config(command=lista.yview)
+        self.gl_lista = tk.Listbox(lf, yscrollcommand=sb.set, font=("Consolas", 10), height=12)
+        self._gl_ids = []
+        for t in lista_t:
+            self.gl_lista.insert(tk.END, f"{t['nome']}  [{t['tipo']}]")
+            self._gl_ids.append(t["id"])
+        self.gl_lista.pack(fill=tk.BOTH, expand=True)
+        sb.config(command=self.gl_lista.yview)
+        cf = ttk.Frame(frame)
+        cf.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Label(cf, text="Easing:").pack(side=tk.LEFT)
+        self.gl_easing = tk.StringVar(value="cubic")
+        ttk.Combobox(cf, textvariable=self.gl_easing, values=[e.value for e in EasingType],
+                     width=12, state="readonly").pack(side=tk.LEFT, padx=4)
+        ttk.Label(cf, text="Duracao (s):").pack(side=tk.LEFT, padx=(12, 0))
+        self.gl_duracao = tk.DoubleVar(value=1.0)
+        ttk.Spinbox(cf, from_=0.1, to=5.0, increment=0.1, textvariable=self.gl_duracao, width=6).pack(side=tk.LEFT)
+        ttk.Button(cf, text="Aplicar entre 2 clipes...", command=self.aplicar_transicao_gl).pack(side=tk.LEFT, padx=8)
+        ttk.Button(cf, text="Usar no projeto (Timeline)", command=self.usar_transicao_no_projeto).pack(side=tk.LEFT)
+        self.gl_log = self._log_widget(frame, 6)
 
     def criar_aba_luts(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  LUTs Avancadas  ")
-        ttk.Label(frame, text="LUTs Profissionais (15+)", font=("Helvetica", 16, "bold")).pack(pady=20)
-        lf = ttk.LabelFrame(frame, text="LUTs Disponiveis", padding=15)
-        lf.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        row = col = 0
-        for lut in self.luts.listar_luts():
-            ttk.Button(lf, text=lut.nome, width=20, command=lambda l=lut: self.aplicar_lut_video(l)).grid(row=row, column=col, padx=5, pady=5)
-            col += 1
-            if col >= 3:
-                col = 0
-                row += 1
-        cf = ttk.LabelFrame(frame, text="Controles", padding=15)
-        cf.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Label(cf, text="Intensidade:").pack(side=tk.LEFT, padx=5)
+        luts = self.luts.listar_luts()
+        ttk.Label(frame, text=f"LUTs Profissionais ({len(luts)})", font=("Helvetica", 16, "bold")).pack(pady=12)
+        lf = ttk.LabelFrame(frame, text="Aplicar em um arquivo de video", padding=12)
+        lf.pack(fill=tk.BOTH, expand=True, padx=20, pady=6)
+        for k, lut in enumerate(luts):
+            ttk.Button(lf, text=lut.nome, width=20, command=lambda l=lut: self.aplicar_lut_video(l)
+                       ).grid(row=k // 3, column=k % 3, padx=5, pady=5)
+        cf = ttk.LabelFrame(frame, text="Controles", padding=12)
+        cf.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Label(cf, text="Intensidade (0 = original, 1 = look completo):").pack(side=tk.LEFT, padx=5)
         self.lut_intensidade = tk.DoubleVar(value=1.0)
         ttk.Scale(cf, from_=0.0, to=1.0, variable=self.lut_intensidade, orient=tk.HORIZONTAL, length=200).pack(side=tk.LEFT)
+        ttk.Button(cf, text="Carregar .cube...", command=self.carregar_cube).pack(side=tk.LEFT, padx=10)
+        self.lut_log = self._log_widget(frame, 6)
 
     def criar_aba_auto_edicao(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Auto-Edicao  ")
-        ttk.Label(frame, text="Auto-Edicao Inteligente", font=("Helvetica", 16, "bold")).pack(pady=20)
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Detectar Cenas", command=self.detectar_cenas).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Remover Silencios", command=self.remover_silencios).pack(fill=tk.X, pady=5)
-        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=15)
-        cf.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Label(cf, text="Threshold (dB):").pack(anchor=tk.W)
+        ttk.Label(frame, text="Auto-Edicao Inteligente", font=("Helvetica", 16, "bold")).pack(pady=12)
+        af = ttk.LabelFrame(frame, text="Acoes", padding=12)
+        af.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Button(af, text="Detectar Cenas", command=self.detectar_cenas).pack(fill=tk.X, pady=4)
+        ttk.Button(af, text="Remover Silencios", command=self.remover_silencios).pack(fill=tk.X, pady=4)
+        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=12)
+        cf.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Label(cf, text="Threshold de silencio (dB):").pack(anchor=tk.W)
         self.silencio_threshold = tk.DoubleVar(value=-35.0)
         ttk.Scale(cf, from_=-60, to=-20, variable=self.silencio_threshold, orient=tk.HORIZONTAL, length=300).pack(fill=tk.X)
-        self.auto_log = scrolledtext.ScrolledText(frame, height=10, font=("Consolas", 9))
-        self.auto_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        self.auto_log.insert(tk.END, "Aguardando acao...\n")
+        ttk.Label(cf, text="Sensibilidade de cena (0.1 sensivel - 0.6 so cortes fortes):").pack(anchor=tk.W)
+        self.cena_threshold = tk.DoubleVar(value=0.3)
+        ttk.Scale(cf, from_=0.1, to=0.6, variable=self.cena_threshold, orient=tk.HORIZONTAL, length=300).pack(fill=tk.X)
+        self.auto_log = self._log_widget(frame, 10)
 
     def criar_aba_legendas(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Legendas AI  ")
-        ttk.Label(frame, text="Legendas Automaticas (Whisper AI)", font=("Helvetica", 16, "bold")).pack(pady=20)
-        sf = ttk.LabelFrame(frame, text="Status", padding=15)
-        sf.pack(fill=tk.X, padx=20, pady=10)
-        if self._ok(self.subtitles, "whisper_disponivel"):
-            ttk.Label(sf, text="[OK] Whisper instalado", foreground="green").pack(anchor=tk.W)
-        else:
-            ttk.Label(sf, text="[!] pip install openai-whisper", foreground="orange").pack(anchor=tk.W)
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Gerar Legendas (SRT)", command=self.gerar_legendas).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Queimar Legendas no Video", command=self.queimar_legendas).pack(fill=tk.X, pady=5)
-        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=15)
-        cf.pack(fill=tk.X, padx=20, pady=10)
+        ttk.Label(frame, text="Legendas Automaticas (Whisper AI)", font=("Helvetica", 16, "bold")).pack(pady=12)
+        sf = ttk.LabelFrame(frame, text="Status", padding=12)
+        sf.pack(fill=tk.X, padx=20, pady=6)
+        self._status(sf, self._ok(self.subtitles, "whisper_disponivel"), "Whisper instalado",
+                     "pip install openai-whisper")
+        af = ttk.LabelFrame(frame, text="Acoes", padding=12)
+        af.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Button(af, text="Gerar Legendas (SRT)...", command=self.gerar_legendas).pack(fill=tk.X, pady=4)
+        ttk.Button(af, text="Queimar Legendas no Video...", command=self.queimar_legendas).pack(fill=tk.X, pady=4)
+        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=12)
+        cf.pack(fill=tk.X, padx=20, pady=6)
         ttk.Label(cf, text="Idioma:").pack(anchor=tk.W)
         self.legendas_idioma = tk.StringVar(value="pt")
-        ttk.Combobox(cf, textvariable=self.legendas_idioma, values=["pt","en","es","fr","de"], width=10).pack(anchor=tk.W, pady=3)
+        ttk.Combobox(cf, textvariable=self.legendas_idioma, values=["pt", "en", "es", "fr", "de", "it"], width=10).pack(anchor=tk.W, pady=3)
         ttk.Label(cf, text="Modelo:").pack(anchor=tk.W)
         self.legendas_modelo = tk.StringVar(value="base")
-        ttk.Combobox(cf, textvariable=self.legendas_modelo, values=["tiny","base","small","medium","large"], width=10).pack(anchor=tk.W, pady=3)
-        self.legendas_log = scrolledtext.ScrolledText(frame, height=10, font=("Consolas", 9))
-        self.legendas_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        ttk.Combobox(cf, textvariable=self.legendas_modelo, values=["tiny", "base", "small", "medium", "large", "turbo"], width=10).pack(anchor=tk.W, pady=3)
+        self.legendas_log = self._log_widget(frame, 10, "")
 
     def criar_aba_vertical(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Vertical  ")
-        ttk.Label(frame, text="Conversor Vertical 9:16", font=("Helvetica", 16, "bold")).pack(pady=20)
-        sf = ttk.LabelFrame(frame, text="Status", padding=15)
-        sf.pack(fill=tk.X, padx=20, pady=10)
-        if self._ok(self.vertical, "insightface_disponivel"):
-            ttk.Label(sf, text="[OK] InsightFace instalado", foreground="green").pack(anchor=tk.W)
-        else:
-            ttk.Label(sf, text="[!] pip install insightface opencv-python", foreground="orange").pack(anchor=tk.W)
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Converter para Vertical (9:16)", command=self.converter_vertical).pack(fill=tk.X, pady=5)
-        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=15)
-        cf.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Label(cf, text="Modo:").pack(anchor=tk.W)
+        ttk.Label(frame, text="Conversor Vertical 9:16", font=("Helvetica", 16, "bold")).pack(pady=12)
+        sf = ttk.LabelFrame(frame, text="Status", padding=12)
+        sf.pack(fill=tk.X, padx=20, pady=6)
+        self._status(sf, self._ok(self.vertical, "insightface_disponivel") and self._ok(self.vertical, "opencv_disponivel"),
+                     "InsightFace + OpenCV (modo smart)", "modo smart = centro (pip install insightface opencv-python onnxruntime)")
+        af = ttk.LabelFrame(frame, text="Acoes", padding=12)
+        af.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Button(af, text="Converter para Vertical (9:16)...", command=self.converter_vertical).pack(fill=tk.X, pady=4)
+        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=12)
+        cf.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Label(cf, text="Modo de recorte (quando o blur esta desligado):").pack(anchor=tk.W)
         self.vertical_modo = tk.StringVar(value="smart")
-        ttk.Combobox(cf, textvariable=self.vertical_modo, values=["center","top","bottom","smart","manual"], width=15).pack(anchor=tk.W, pady=3)
+        ttk.Combobox(cf, textvariable=self.vertical_modo, values=["center", "top", "bottom", "smart"],
+                     width=15, state="readonly").pack(anchor=tk.W, pady=3)
         self.vertical_blur = tk.BooleanVar(value=True)
-        ttk.Checkbutton(cf, text="Blur no fundo", variable=self.vertical_blur).pack(anchor=tk.W)
-        self.vertical_log = scrolledtext.ScrolledText(frame, height=10, font=("Consolas", 9))
-        self.vertical_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        ttk.Checkbutton(cf, text="Video inteiro sobre fundo desfocado (estilo Reels/TikTok)",
+                        variable=self.vertical_blur).pack(anchor=tk.W)
+        self.vertical_log = self._log_widget(frame, 10, "")
 
     def criar_aba_upscale(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Upscale AI  ")
-        ttk.Label(frame, text="Upscale de Video (Real-ESRGAN)", font=("Helvetica", 16, "bold")).pack(pady=20)
-        sf = ttk.LabelFrame(frame, text="Status", padding=15)
-        sf.pack(fill=tk.X, padx=20, pady=10)
-        if self.upscaler is not None:
-            ttk.Label(sf, text="[OK] Upscaler carregado", foreground="green").pack(anchor=tk.W)
-        else:
-            ttk.Label(sf, text="[!] Real-ESRGAN nao encontrado", foreground="red").pack(anchor=tk.W)
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Upscale 2x", command=lambda: self.fazer_upscale("2x")).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Upscale 4x", command=lambda: self.fazer_upscale("4x")).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Upscale Anime 4x", command=lambda: self.fazer_upscale("anime")).pack(fill=tk.X, pady=5)
+        ttk.Label(frame, text="Upscale de Video (Real-ESRGAN)", font=("Helvetica", 16, "bold")).pack(pady=12)
+        sf = ttk.LabelFrame(frame, text="Status", padding=12)
+        sf.pack(fill=tk.X, padx=20, pady=6)
+        ia = self._ok(self.upscaler, "realesrgan_disponivel")
+        self._status(sf, ia, "Real-ESRGAN ncnn-vulkan (IA)",
+                     "realesrgan-ncnn-vulkan nao encontrado: sera usado o modo classico (FFmpeg lanczos). "
+                     "Coloque o binario no PATH ou em bin/")
+        af = ttk.LabelFrame(frame, text="Acoes", padding=12)
+        af.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Button(af, text="Upscale 2x...", command=lambda: self.fazer_upscale("2x")).pack(fill=tk.X, pady=4)
+        ttk.Button(af, text="Upscale 4x...", command=lambda: self.fazer_upscale("4x")).pack(fill=tk.X, pady=4)
+        ttk.Button(af, text="Upscale Anime 4x...", command=lambda: self.fazer_upscale("anime")).pack(fill=tk.X, pady=4)
         self.upscale_gpu = tk.BooleanVar(value=True)
-        ttk.Checkbutton(af, text="Usar GPU", variable=self.upscale_gpu).pack(anchor=tk.W, pady=5)
-        self.upscale_log = scrolledtext.ScrolledText(frame, height=10, font=("Consolas", 9))
-        self.upscale_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        self.upscale_log.insert(tk.END, "Aguardando acao...\n")
+        ttk.Checkbutton(af, text="Usar GPU (Vulkan) - desmarcado = modo classico", variable=self.upscale_gpu).pack(anchor=tk.W, pady=4)
+        self.upscale_log = self._log_widget(frame, 10)
 
     def criar_aba_stems(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Audio Stems  ")
-        ttk.Label(frame, text="Separacao de Audio (Demucs AI)", font=("Helvetica", 16, "bold")).pack(pady=20)
-        sf = ttk.LabelFrame(frame, text="Status", padding=15)
-        sf.pack(fill=tk.X, padx=20, pady=10)
-        if self.stems is not None and self._ok(self.stems, "demucs_disponivel"):
-            ttk.Label(sf, text="[OK] Demucs instalado", foreground="green").pack(anchor=tk.W)
-        else:
-            ttk.Label(sf, text="[!] pip install demucs", foreground="orange").pack(anchor=tk.W)
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Separar Vocais + Instrumental", command=self.separar_vocais).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Separar 4 Stems", command=self.separar_todos_stems).pack(fill=tk.X, pady=5)
-        self.stems_log = scrolledtext.ScrolledText(frame, height=10, font=("Consolas", 9))
-        self.stems_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        self.stems_log.insert(tk.END, "Aguardando acao...\n")
+        ttk.Label(frame, text="Separacao de Audio (Demucs AI)", font=("Helvetica", 16, "bold")).pack(pady=12)
+        sf = ttk.LabelFrame(frame, text="Status", padding=12)
+        sf.pack(fill=tk.X, padx=20, pady=6)
+        self._status(sf, self._ok(self.stems, "demucs_disponivel"), "Demucs instalado", "pip install demucs")
+        af = ttk.LabelFrame(frame, text="Acoes", padding=12)
+        af.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Button(af, text="Separar Vocais + Instrumental...", command=self.separar_vocais).pack(fill=tk.X, pady=4)
+        ttk.Button(af, text="Separar 4 Stems...", command=self.separar_todos_stems).pack(fill=tk.X, pady=4)
+        self.stems_log = self._log_widget(frame, 10)
 
     def criar_aba_legendas_turbo(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Legendas Turbo  ")
-        ttk.Label(frame, text="Legendas Turbo (faster-whisper)", font=("Helvetica", 16, "bold")).pack(pady=20)
-        sf = ttk.LabelFrame(frame, text="Status", padding=15)
-        sf.pack(fill=tk.X, padx=20, pady=10)
-        try:
-            import faster_whisper
-            ttk.Label(sf, text="[OK] faster-whisper instalado", foreground="green").pack(anchor=tk.W)
-        except ImportError:
-            ttk.Label(sf, text="[!] pip install faster-whisper", foreground="orange").pack(anchor=tk.W)
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Gerar Legendas TURBO (SRT)", command=self.gerar_legendas_turbo).pack(fill=tk.X, pady=5)
-        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=15)
-        cf.pack(fill=tk.X, padx=20, pady=10)
+        ttk.Label(frame, text="Legendas Turbo (faster-whisper)", font=("Helvetica", 16, "bold")).pack(pady=12)
+        sf = ttk.LabelFrame(frame, text="Status", padding=12)
+        sf.pack(fill=tk.X, padx=20, pady=6)
+        self._status(sf, _instalado("faster_whisper"), "faster-whisper instalado", "pip install faster-whisper")
+        af = ttk.LabelFrame(frame, text="Acoes", padding=12)
+        af.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Button(af, text="Gerar Legendas TURBO (SRT)...", command=self.gerar_legendas_turbo).pack(fill=tk.X, pady=4)
+        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=12)
+        cf.pack(fill=tk.X, padx=20, pady=6)
         ttk.Label(cf, text="Idioma:").pack(anchor=tk.W)
         self.turbo_idioma = tk.StringVar(value="pt")
-        ttk.Combobox(cf, textvariable=self.turbo_idioma, values=["pt","en","es","fr","de"], width=10).pack(anchor=tk.W, pady=3)
+        ttk.Combobox(cf, textvariable=self.turbo_idioma, values=["pt", "en", "es", "fr", "de", "it"], width=10).pack(anchor=tk.W, pady=3)
         ttk.Label(cf, text="Modelo:").pack(anchor=tk.W)
         self.turbo_modelo = tk.StringVar(value="base")
-        ttk.Combobox(cf, textvariable=self.turbo_modelo, values=["tiny","base","small","medium","large-v2","large-v3"], width=15).pack(anchor=tk.W, pady=3)
+        ttk.Combobox(cf, textvariable=self.turbo_modelo, values=["tiny", "base", "small", "medium", "large-v2", "large-v3", "turbo"], width=15).pack(anchor=tk.W, pady=3)
         ttk.Label(cf, text="Device:").pack(anchor=tk.W)
-        self.turbo_device = tk.StringVar(value="cpu")
-        ttk.Combobox(cf, textvariable=self.turbo_device, values=["cuda","cpu"], width=10).pack(anchor=tk.W, pady=3)
-        self.turbo_log = scrolledtext.ScrolledText(frame, height=10, font=("Consolas", 9))
-        self.turbo_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        self.turbo_log.insert(tk.END, "Aguardando acao...\n")
+        self.turbo_device = tk.StringVar(value="auto")
+        ttk.Combobox(cf, textvariable=self.turbo_device, values=["auto", "cuda", "cpu"], width=10).pack(anchor=tk.W, pady=3)
+        self.turbo_log = self._log_widget(frame, 10)
 
     def criar_aba_download(self, nb):
         frame = ttk.Frame(nb)
@@ -313,11 +365,12 @@ class V73Patch:
         esq.pack_propagate(False)
         sf = ttk.LabelFrame(esq, text="Status", padding=8)
         sf.pack(fill=tk.X, pady=(0, 6))
-        if self.downloader is not None:
-            ttk.Label(sf, text="[OK] yt-dlp + instaloader prontos", foreground="green").pack(anchor=tk.W)
-            ttk.Label(sf, text="YouTube, Instagram, TikTok, Vimeo...", foreground="green").pack(anchor=tk.W)
-        else:
-            ttk.Label(sf, text="[!] pip install yt-dlp instaloader", foreground="red").pack(anchor=tk.W)
+        import definitive_downloader as dd
+        self._status(sf, dd.YT_DLP_OK, "yt-dlp pronto (YouTube, Instagram, TikTok, Vimeo...)", "pip install -U yt-dlp")
+        if self.downloader is not None and dd.YT_DLP_OK:
+            origem = (str(self.downloader.cookies_txt) if self.downloader.cookies_txt
+                      else (self.downloader.browser or "nenhum"))
+            ttk.Label(sf, text=f"Cookies: {origem}").pack(anchor=tk.W)
         uf = ttk.LabelFrame(esq, text="URL do Video", padding=8)
         uf.pack(fill=tk.X, pady=(0, 6))
         self.download_url = ttk.Entry(uf, font=("Consolas", 9))
@@ -326,7 +379,7 @@ class V73Patch:
         qf = ttk.LabelFrame(esq, text="Qualidade", padding=8)
         qf.pack(fill=tk.X, pady=(0, 6))
         self.download_qualidade = tk.StringVar(value="best")
-        for txt, val in [("Melhor qualidade","best"),("1080p","1080p"),("720p","720p"),("480p","480p"),("Apenas audio","audio")]:
+        for txt, val in [("Melhor qualidade", "best"), ("1080p", "1080p"), ("720p", "720p"), ("480p", "480p"), ("Apenas audio", "audio")]:
             ttk.Radiobutton(qf, text=txt, variable=self.download_qualidade, value=val).pack(anchor=tk.W)
         af = ttk.LabelFrame(esq, text="Acoes", padding=8)
         af.pack(fill=tk.X, pady=(0, 6))
@@ -338,643 +391,579 @@ class V73Patch:
         self.download_log = scrolledtext.ScrolledText(dir_, font=("Consolas", 9))
         self.download_log.pack(fill=tk.BOTH, expand=True)
         self.download_log.insert(tk.END, "Cole uma URL e clique em Baixar\n")
-        self.download_log.insert(tk.END, "Suporta: YouTube, Instagram, TikTok, Vimeo, Twitter e mais\n")
 
     def criar_aba_face_restore(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Face Restore  ")
-        ttk.Label(frame, text="Restauracao de Rostos (GFPGAN)", font=("Helvetica", 16, "bold")).pack(pady=20)
-        sf = ttk.LabelFrame(frame, text="Status", padding=15)
-        sf.pack(fill=tk.X, padx=20, pady=10)
-        if self.face_restore is not None and self._ok(self.face_restore, "gfpgan_disponivel"):
-            ttk.Label(sf, text="[OK] GFPGAN instalado", foreground="green").pack(anchor=tk.W)
-        else:
-            ttk.Label(sf, text="[!] pip install gfpgan", foreground="orange").pack(anchor=tk.W)
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Restaurar Rostos no Video", command=self.restaurar_rostos).pack(fill=tk.X, pady=5)
-        self.face_log = scrolledtext.ScrolledText(frame, height=12, font=("Consolas", 9))
-        self.face_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        self.face_log.insert(tk.END, "Aguardando acao...\n")
+        ttk.Label(frame, text="Restauracao de Rostos (GFPGAN)", font=("Helvetica", 16, "bold")).pack(pady=12)
+        sf = ttk.LabelFrame(frame, text="Status", padding=12)
+        sf.pack(fill=tk.X, padx=20, pady=6)
+        self._status(sf, self._ok(self.face_restore, "gfpgan_disponivel"), "GFPGAN instalado", "pip install gfpgan")
+        af = ttk.LabelFrame(frame, text="Acoes", padding=12)
+        af.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Button(af, text="Restaurar Rostos no Video...", command=self.restaurar_rostos).pack(fill=tk.X, pady=4)
+        self.face_gpu = tk.BooleanVar(value=True)
+        ttk.Checkbutton(af, text="Usar GPU (CUDA) se disponivel", variable=self.face_gpu).pack(anchor=tk.W)
+        self.face_log = self._log_widget(frame, 12)
 
     def criar_aba_whisperx(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  WhisperX  ")
-        ttk.Label(frame, text="WhisperX - Timestamps por Palavra", font=("Helvetica", 16, "bold")).pack(pady=20)
-        sf = ttk.LabelFrame(frame, text="Status", padding=15)
-        sf.pack(fill=tk.X, padx=20, pady=10)
-        try:
-            import whisperx
-            ttk.Label(sf, text="[OK] WhisperX instalado", foreground="green").pack(anchor=tk.W)
-        except ImportError:
-            ttk.Label(sf, text="[!] pip install whisperx", foreground="orange").pack(anchor=tk.W)
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Gerar Legendas Karaoke (ASS)", command=self.gerar_karaoke).pack(fill=tk.X, pady=5)
-        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=15)
-        cf.pack(fill=tk.X, padx=20, pady=10)
+        ttk.Label(frame, text="WhisperX - Timestamps por Palavra", font=("Helvetica", 16, "bold")).pack(pady=12)
+        sf = ttk.LabelFrame(frame, text="Status", padding=12)
+        sf.pack(fill=tk.X, padx=20, pady=6)
+        self._status(sf, _instalado("whisperx"), "WhisperX instalado", "pip install whisperx")
+        af = ttk.LabelFrame(frame, text="Acoes", padding=12)
+        af.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Button(af, text="Gerar Legendas Karaoke (ASS)...", command=self.gerar_karaoke).pack(fill=tk.X, pady=4)
+        cf = ttk.LabelFrame(frame, text="Configuracoes", padding=12)
+        cf.pack(fill=tk.X, padx=20, pady=6)
         ttk.Label(cf, text="Idioma:").pack(anchor=tk.W)
         self.whisperx_idioma = tk.StringVar(value="pt")
-        ttk.Combobox(cf, textvariable=self.whisperx_idioma, values=["pt","en","es","fr","de"], width=10).pack(anchor=tk.W, pady=3)
+        ttk.Combobox(cf, textvariable=self.whisperx_idioma, values=["pt", "en", "es", "fr", "de", "it"], width=10).pack(anchor=tk.W, pady=3)
         ttk.Label(cf, text="Modelo:").pack(anchor=tk.W)
         self.whisperx_modelo = tk.StringVar(value="base")
-        ttk.Combobox(cf, textvariable=self.whisperx_modelo, values=["tiny","base","small","medium","large-v2"], width=15).pack(anchor=tk.W, pady=3)
-        self.whisperx_log = scrolledtext.ScrolledText(frame, height=12, font=("Consolas", 9))
-        self.whisperx_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        self.whisperx_log.insert(tk.END, "Aguardando acao...\n")
+        ttk.Combobox(cf, textvariable=self.whisperx_modelo, values=["tiny", "base", "small", "medium", "large-v2", "large-v3"], width=15).pack(anchor=tk.W, pady=3)
+        self.whisperx_log = self._log_widget(frame, 12)
 
     def criar_aba_auto_edit_suite(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Auto-Edit Suite  ")
-        ttk.Label(frame, text="Suite de Edicao Automatizada com IA", font=("Helvetica", 16, "bold")).pack(pady=20)
+        ttk.Label(frame, text="Suite de Edicao Automatizada", font=("Helvetica", 16, "bold")).pack(pady=12)
+        sf = ttk.LabelFrame(frame, text="Ferramentas", padding=12)
+        sf.pack(fill=tk.X, padx=20, pady=6)
+        self._status(sf, bool(binario("ffmpeg")), "FFmpeg (edicao, audio, cor, formatos)", "FFmpeg nao encontrado no PATH")
+        self._status(sf, bool(binario("ffplay")), "ffplay (preview)", "ffplay ausente: preview abre no player do sistema")
+        self._status(sf, self._ok(self.subtitles, "whisper_disponivel"), "Whisper (legendas automaticas)",
+                     "pip install openai-whisper (legendas automaticas)")
 
-        # Status das libs profissionais
-        sf = ttk.LabelFrame(frame, text="Bibliotecas Profissionais", padding=15)
-        sf.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Label(sf, text="[OK] moviepy" if MOVIEPY_OK else "[!] pip install moviepy",
-                  foreground="green" if MOVIEPY_OK else "orange").pack(anchor=tk.W)
-        ttk.Label(sf, text="[OK] ffmpeg-python" if FFMPEG_PYTHON_OK else "[!] pip install ffmpeg-python",
-                  foreground="green" if FFMPEG_PYTHON_OK else "orange").pack(anchor=tk.W)
-        ttk.Label(sf, text="[OK] pydub" if PYDUB_OK else "[!] pip install pydub",
-                  foreground="green" if PYDUB_OK else "orange").pack(anchor=tk.W)
+        af = ttk.LabelFrame(frame, text="Acoes", padding=12)
+        af.pack(fill=tk.X, padx=20, pady=6)
+        grade = [("Preview Rapido", self.preview_moviepy), ("Speed / Slow Motion...", self.speed_ramp_moviepy),
+                 ("Cortar Clipe (Trim)...", self.trim_moviepy), ("Analise de Audio (EBU R128)", self.analisar_audio_pydub),
+                 ("Normalizar Audio (LUFS)...", self.normalizar_audio_pydub),
+                 ("Edicao Automatica Completa", self.editar_automatico_completo),
+                 ("Color Grading Automatico", self.color_grading_automatico),
+                 ("Mixagem Automatica", self.mixagem_automatica),
+                 ("Legendas Automaticas", self.legendas_automaticas),
+                 ("Converter Todas as Plataformas", self.converter_todas_plataformas)]
+        for k, (txt, cmd) in enumerate(grade):
+            ttk.Button(af, text=txt, command=cmd, width=34).grid(row=k // 2, column=k % 2, padx=4, pady=3, sticky=tk.W)
+        of = ttk.Frame(frame)
+        of.pack(fill=tk.X, padx=20)
+        ttk.Label(of, text="Padrao da mixagem:").pack(side=tk.LEFT)
+        self.auto_audio_padrao = tk.StringVar(value="YouTube")
+        ttk.Combobox(of, textvariable=self.auto_audio_padrao, values=list(PADROES_LOUDNESS), width=12,
+                     state="readonly").pack(side=tk.LEFT, padx=4)
+        ttk.Label(of, text="  Estilo da legenda:").pack(side=tk.LEFT)
+        self.auto_caption_estilo = tk.StringVar(value="simples")
+        ttk.Combobox(of, textvariable=self.auto_caption_estilo, values=list(AutoCaptionAI.ESTILOS), width=10,
+                     state="readonly").pack(side=tk.LEFT, padx=4)
+        self.auto_suite_log = self._log_widget(frame, 10)
 
-        sf2 = ttk.LabelFrame(frame, text="Modulos AI", padding=15)
-        sf2.pack(fill=tk.X, padx=20, pady=10)
-        for nome, mod in [("Auto-Editor AI","auto_editor_ai"),("Auto-Color AI","auto_color_ai"),("Auto-Audio AI","auto_audio_ai"),("Auto-Caption AI","auto_caption_ai"),("Auto-Format AI","auto_format_ai")]:
-            try:
-                __import__(mod)
-                ttk.Label(sf2, text=f"[OK] {nome}", foreground="green").pack(anchor=tk.W)
-            except ImportError:
-                ttk.Label(sf2, text=f"[!] {nome}", foreground="orange").pack(anchor=tk.W)
+    # ============================================================ acoes: transicoes / LUT
+    def _gl_selecionada(self):
+        sel = self.gl_lista.curselection()
+        if not sel:
+            messagebox.showwarning("Transicoes", "Selecione uma transicao na lista.")
+            return None
+        return self._gl_ids[sel[0]]
 
-        af = ttk.LabelFrame(frame, text="Acoes", padding=15)
-        af.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Button(af, text="Preview Rapido (moviepy)", command=self.preview_moviepy).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Speed Ramp / Slow Motion", command=self.speed_ramp_moviepy).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Cortar Clipe (Trim)", command=self.trim_moviepy).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Analise de Audio (pydub)", command=self.analisar_audio_pydub).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Normalizar Audio (pydub)", command=self.normalizar_audio_pydub).pack(fill=tk.X, pady=5)
-        ttk.Separator(af, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Edicao Automatica Completa", command=self.editar_automatico_completo).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Color Grading Automatico", command=self.color_grading_automatico).pack(fill=tk.X, pady=5)
-        ttk.Button(af, text="Converter Todas as Plataformas", command=self.converter_todas_plataformas).pack(fill=tk.X, pady=5)
+    def aplicar_transicao_gl(self):
+        tid = self._gl_selecionada()
+        if not tid:
+            return
+        a = self._abrir("Primeiro clipe")
+        if not a:
+            return
+        b = self._abrir("Segundo clipe")
+        if not b:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        t = GLTransition(tid, float(self.gl_duracao.get()), EasingType(self.gl_easing.get()))
+        self._tarefa(self.gl_log, "Transicao",
+                     lambda log: GLTransitionsEngine(log).renderizar_transicao(Path(a), Path(b), t, Path(s)),
+                     f"Transicao salva em {s}")
 
-        self.auto_suite_log = scrolledtext.ScrolledText(frame, height=10, font=("Consolas", 9))
-        self.auto_suite_log.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        self.auto_suite_log.insert(tk.END, "Aguardando acao...\n")
+    def usar_transicao_no_projeto(self):
+        tid = self._gl_selecionada()
+        if not tid:
+            return
+        nome = self.gl_trans.TRANSICOES_GL[tid]["nome"]
+        if hasattr(self.app, "transicao_var"):
+            self.app.transicao_var.set(nome)
+            self.app.transicao_dur_var.set(float(self.gl_duracao.get()))
+        self._escrever(self.gl_log, f"Transicao do projeto: {nome} ({self.gl_duracao.get():.1f}s)")
 
-    # =========================================================
-    # ACOES moviepy / ffmpeg-python / pydub (NOVAS)
-    # =========================================================
-
-    def preview_moviepy(self):
-        """Preview funcional via moviepy (substitui placeholder do app base)"""
-        if not MOVIEPY_OK:
-            messagebox.showerror("Erro", "pip install moviepy --break-system-packages"); return
-        v = filedialog.askopenfilename(title="Video para preview", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        self.auto_suite_log.delete(1.0, tk.END)
-        self.auto_suite_log.insert(tk.END, f"Abrindo preview: {Path(v).name}\n")
-        self.auto_suite_log.insert(tk.END, "Feche a janela de preview para continuar.\n")
-        def t():
-            try:
-                clip = mpy.VideoFileClip(v)
-                duracao = clip.duration
-                self.auto_suite_log.insert(tk.END, f"Duracao: {duracao:.1f}s | {clip.size[0]}x{clip.size[1]} | {clip.fps}fps\n")
-                # Preview dos primeiros 30s
-                preview_clip = clip.subclip(0, min(30, duracao))
-                preview_clip.preview(fps=24)
-                clip.close()
-                self.auto_suite_log.insert(tk.END, "[OK] Preview concluido.\n")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
-
-    def speed_ramp_moviepy(self):
-        """Speed ramp / slow motion via moviepy (substitui placeholder do app base)"""
-        if not MOVIEPY_OK:
-            messagebox.showerror("Erro", "pip install moviepy --break-system-packages"); return
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-
-        # Diálogo de velocidade
-        dlg = tk.Toplevel(self.app.root)
-        dlg.title("Speed Ramp")
-        dlg.geometry("300x150")
-        dlg.grab_set()
-        ttk.Label(dlg, text="Velocidade (0.25 = 4x lento, 2.0 = 2x rapido):").pack(pady=10)
-        speed_var = tk.DoubleVar(value=0.5)
-        ttk.Scale(dlg, from_=0.1, to=4.0, variable=speed_var, orient=tk.HORIZONTAL, length=250).pack()
-        speed_label = ttk.Label(dlg, text="0.50x")
-        speed_label.pack()
-        def update_label(v): speed_label.config(text=f"{float(v):.2f}x")
-        ttk.Scale(dlg, from_=0.1, to=4.0, variable=speed_var, orient=tk.HORIZONTAL, length=250, command=update_label).pack()
-        resultado = [None]
-        def confirmar(): resultado[0] = speed_var.get(); dlg.destroy()
-        ttk.Button(dlg, text="Aplicar", command=confirmar).pack(pady=10)
-        self.app.root.wait_window(dlg)
-        if resultado[0] is None: return
-
-        velocidade = resultado[0]
-        self.auto_suite_log.delete(1.0, tk.END)
-        self.auto_suite_log.insert(tk.END, f"Aplicando speed {velocidade:.2f}x em {Path(v).name}...\n")
-        def t():
-            try:
-                from moviepy.video.fx.all import speedx
-                clip = mpy.VideoFileClip(v)
-                clip_modificado = clip.fx(speedx, velocidade)
-                clip_modificado.write_videofile(s, codec="libx264", audio_codec="aac",
-                                                 logger=None, verbose=False)
-                clip.close()
-                self.auto_suite_log.insert(tk.END, f"[OK] Salvo: {s}\n")
-                messagebox.showinfo("Sucesso", f"Speed ramp {velocidade:.2f}x aplicado!")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
-
-    def trim_moviepy(self):
-        """Cortar clipe com precisao via moviepy"""
-        if not MOVIEPY_OK:
-            messagebox.showerror("Erro", "pip install moviepy --break-system-packages"); return
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-
-        # Pega duração
-        try:
-            clip_info = mpy.VideoFileClip(v)
-            duracao = clip_info.duration
-            clip_info.close()
-        except Exception as e:
-            messagebox.showerror("Erro", f"Nao foi possivel ler o video: {e}"); return
-
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-
-        dlg = tk.Toplevel(self.app.root)
-        dlg.title("Cortar Clipe")
-        dlg.geometry("350x200")
-        dlg.grab_set()
-        ttk.Label(dlg, text=f"Duracao total: {duracao:.1f}s").pack(pady=5)
-        ttk.Label(dlg, text="Inicio (segundos):").pack()
-        inicio_var = tk.StringVar(value="0")
-        ttk.Entry(dlg, textvariable=inicio_var, width=15).pack()
-        ttk.Label(dlg, text="Fim (segundos):").pack()
-        fim_var = tk.StringVar(value=f"{duracao:.1f}")
-        ttk.Entry(dlg, textvariable=fim_var, width=15).pack()
-        resultado = [None]
-        def confirmar():
-            try:
-                resultado[0] = (float(inicio_var.get()), float(fim_var.get()))
-                dlg.destroy()
-            except: messagebox.showerror("Erro", "Valores invalidos")
-        ttk.Button(dlg, text="Cortar", command=confirmar).pack(pady=10)
-        self.app.root.wait_window(dlg)
-        if resultado[0] is None: return
-
-        inicio, fim = resultado[0]
-        self.auto_suite_log.delete(1.0, tk.END)
-        self.auto_suite_log.insert(tk.END, f"Cortando {inicio:.1f}s - {fim:.1f}s de {Path(v).name}...\n")
-        def t():
-            try:
-                clip = mpy.VideoFileClip(v).subclip(inicio, fim)
-                clip.write_videofile(s, codec="libx264", audio_codec="aac",
-                                      logger=None, verbose=False)
-                clip.close()
-                self.auto_suite_log.insert(tk.END, f"[OK] Salvo: {s}\n")
-                messagebox.showinfo("Sucesso", f"Clipe cortado: {fim-inicio:.1f}s")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
-
-    def analisar_audio_pydub(self):
-        """Analise de loudness e pico via pydub"""
-        if not PYDUB_OK:
-            messagebox.showerror("Erro", "pip install pydub --break-system-packages"); return
-        v = filedialog.askopenfilename(title="Audio/Video", filetypes=[("Audio/Video","*.mp3 *.wav *.mp4 *.mov *.avi *.mkv *.m4a *.flac")])
-        if not v: return
-        self.auto_suite_log.delete(1.0, tk.END)
-        self.auto_suite_log.insert(tk.END, f"Analisando audio: {Path(v).name}...\n")
-        def t():
-            try:
-                audio = AudioSegment.from_file(v)
-                duracao = len(audio) / 1000.0
-                loudness = audio.dBFS
-                pico = audio.max_dBFS
-                canais = audio.channels
-                sample_rate = audio.frame_rate
-                self.auto_suite_log.insert(tk.END, f"\n{'='*50}\n")
-                self.auto_suite_log.insert(tk.END, f"ANALISE DE AUDIO\n")
-                self.auto_suite_log.insert(tk.END, f"{'='*50}\n")
-                self.auto_suite_log.insert(tk.END, f"Arquivo:     {Path(v).name}\n")
-                self.auto_suite_log.insert(tk.END, f"Duracao:     {duracao:.1f}s\n")
-                self.auto_suite_log.insert(tk.END, f"Canais:      {canais} ({'Stereo' if canais==2 else 'Mono'})\n")
-                self.auto_suite_log.insert(tk.END, f"Sample rate: {sample_rate} Hz\n")
-                self.auto_suite_log.insert(tk.END, f"Loudness:    {loudness:.1f} dBFS\n")
-                self.auto_suite_log.insert(tk.END, f"Pico:        {pico:.1f} dBFS\n")
-                # Avaliacao
-                self.auto_suite_log.insert(tk.END, f"\nAVALIACAO:\n")
-                if loudness > -14:
-                    self.auto_suite_log.insert(tk.END, f"[!] Muito alto para web ({loudness:.1f} dBFS, ideal: -16 dBFS)\n")
-                elif loudness < -30:
-                    self.auto_suite_log.insert(tk.END, f"[!] Muito baixo ({loudness:.1f} dBFS, ideal: -16 dBFS)\n")
-                else:
-                    self.auto_suite_log.insert(tk.END, f"[OK] Nivel adequado para web ({loudness:.1f} dBFS)\n")
-                if pico > -1:
-                    self.auto_suite_log.insert(tk.END, f"[!] Risco de clipping (pico: {pico:.1f} dBFS)\n")
-                else:
-                    self.auto_suite_log.insert(tk.END, f"[OK] Sem clipping (pico: {pico:.1f} dBFS)\n")
-                self.auto_suite_log.insert(tk.END, f"{'='*50}\n")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
-
-    def normalizar_audio_pydub(self):
-        """Normalizar audio para -14 dBFS (YouTube) via pydub"""
-        if not PYDUB_OK:
-            messagebox.showerror("Erro", "pip install pydub --break-system-packages"); return
-        v = filedialog.askopenfilename(title="Audio/Video", filetypes=[("Audio/Video","*.mp3 *.wav *.mp4 *.mov *.m4a *.flac")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp3",
-                                          filetypes=[("MP3","*.mp3"),("WAV","*.wav"),("MP4","*.mp4")])
-        if not s: return
-
-        target_var = tk.StringVar(value="-14")
-        dlg = tk.Toplevel(self.app.root)
-        dlg.title("Normalizar Audio")
-        dlg.geometry("280x130")
-        dlg.grab_set()
-        ttk.Label(dlg, text="Target dBFS:").pack(pady=5)
-        ttk.Combobox(dlg, textvariable=target_var,
-                     values=["-14 (YouTube)", "-16 (Podcast)", "-23 (Broadcast)", "-9 (Maximo)"],
-                     width=20).pack()
-        resultado = [None]
-        def ok(): resultado[0] = float(target_var.get().split()[0]); dlg.destroy()
-        ttk.Button(dlg, text="Normalizar", command=ok).pack(pady=10)
-        self.app.root.wait_window(dlg)
-        if resultado[0] is None: return
-
-        target_dbfs = resultado[0]
-        self.auto_suite_log.delete(1.0, tk.END)
-        self.auto_suite_log.insert(tk.END, f"Normalizando para {target_dbfs} dBFS...\n")
-        def t():
-            try:
-                audio = AudioSegment.from_file(v)
-                loudness_atual = audio.dBFS
-                diferenca = target_dbfs - loudness_atual
-                audio_normalizado = audio.apply_gain(diferenca)
-                ext = Path(s).suffix.lower()
-                fmt = "mp3" if ext == ".mp3" else "wav" if ext == ".wav" else "mp4"
-                audio_normalizado.export(s, format=fmt)
-                self.auto_suite_log.insert(tk.END, f"[OK] {loudness_atual:.1f} dBFS -> {target_dbfs} dBFS\n")
-                self.auto_suite_log.insert(tk.END, f"[OK] Salvo: {s}\n")
-                messagebox.showinfo("Sucesso", f"Audio normalizado para {target_dbfs} dBFS!")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
-
-    # =========================================================
-    # ACOES originais
-    # =========================================================
+    def carregar_cube(self):
+        arq = filedialog.askopenfilename(filetypes=[("LUT 3D", "*.cube")])
+        if arq:
+            p = Path(arq)
+            self.luts.adicionar_lut_personalizada(p.stem, p)
+            self._escrever(self.lut_log, f"LUT '{p.stem}' carregada. Use 'Aplicar' abaixo ou na aba Cor.")
+            self.aplicar_lut_video(next(l for l in self.luts.listar_luts() if l.nome == p.stem))
 
     def aplicar_lut_video(self, lut):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-        def t():
-            try:
-                self.luts.aplicar_lut(Path(v), lut.nome, Path(s), self.lut_intensidade.get())
-                messagebox.showinfo("Sucesso", "LUT aplicado!")
-            except Exception as e:
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        intensidade = self.lut_intensidade.get()
+        self._tarefa(self.lut_log, "LUT", lambda log: self.luts.aplicar_lut(Path(v), lut.nome, Path(s), intensidade),
+                     f"'{lut.nome}' aplicado em {Path(s).name}")
 
+    # ============================================================ acoes: auto-edicao
     def detectar_cenas(self):
-        self.log_auto("DETECTANDO CENAS...")
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        def t():
-            try:
-                cenas = self.auto_editor.detectar_cortes_cena(Path(v))
-                self.log_auto(f"[OK] {len(cenas)} cenas detectadas!")
-                for i, c in enumerate(cenas, 1):
-                    self.log_auto(f"Cena {i}: {c.get('inicio',0):.1f}s - {c.get('fim',0):.1f}s")
-            except Exception as e:
-                import traceback
-                self.log_auto(f"[ERRO] {e}\n{traceback.format_exc()}")
-        threading.Thread(target=t, daemon=True).start()
+        v = self._abrir()
+        if not v:
+            return
+        limiar = self.cena_threshold.get()
+
+        def fn(log):
+            cenas = AutoEditor(log).detectar_cenas(Path(v), limiar)
+            for i, c in enumerate(cenas, 1):
+                log(f"Cena {i}: {c['inicio']:.2f}s - {c['fim']:.2f}s ({c['duracao']:.2f}s)")
+            return cenas
+        self._tarefa(self.auto_log, "Detectar Cenas", fn, lambda c: f"{len(c)} cena(s) detectada(s)", limpar=True)
 
     def remover_silencios(self):
-        self.log_auto("REMOVENDO SILENCIOS...")
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar()
+        if not s:
+            return
         thr = self.silencio_threshold.get()
-        def t():
-            try:
-                self.auto_editor.remover_silencios_simples(Path(v), Path(s), thr)
-                self.log_auto(f"[OK] Salvo: {s}")
-                messagebox.showinfo("Sucesso", "Silencios removidos!")
-            except Exception as e:
-                import traceback
-                self.log_auto(f"[ERRO] {e}\n{traceback.format_exc()}")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        self._tarefa(self.auto_log, "Remover Silencios",
+                     lambda log: AutoEditor(log).remover_silencios_simples(Path(v), Path(s), thr),
+                     f"Silencios removidos: {Path(s).name}", limpar=True)
 
+    # ============================================================ acoes: legendas / vertical
     def gerar_legendas(self):
         if not self._ok(self.subtitles, "whisper_disponivel"):
-            messagebox.showwarning("Aviso", "pip install openai-whisper"); return
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        def t():
-            try:
-                srt = self.subtitles.gerar_legendas(Path(v), self.legendas_idioma.get(), self.legendas_modelo.get(), "srt")
-                self.legendas_log.insert(tk.END, f"[OK] {srt}\n")
-                messagebox.showinfo("Sucesso", "Legendas geradas!")
-            except Exception as e:
-                self.legendas_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+            messagebox.showwarning("Aviso", "pip install openai-whisper")
+            return
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar("Salvar legenda", ".srt", [("SRT", "*.srt")])
+        if not s:
+            return
+        idioma, modelo = self.legendas_idioma.get(), self.legendas_modelo.get()
+        self._tarefa(self.legendas_log, "Legendas",
+                     lambda log: SubtitlesAI(log).gerar_legendas(Path(v), idioma, modelo, "srt", saida=Path(s)),
+                     lambda p: f"Legendas geradas: {p}")
 
     def queimar_legendas(self):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        srt = filedialog.askopenfilename(title="SRT", filetypes=[("SRT","*.srt")])
-        if not srt: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-        def t():
-            try:
-                self.subtitles.queimar_legendas(Path(v), Path(srt), Path(s))
-                messagebox.showinfo("Sucesso", "Legendas queimadas!")
-            except Exception as e:
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        v = self._abrir()
+        if not v:
+            return
+        srt = filedialog.askopenfilename(title="Legenda", filetypes=[("Legendas", "*.srt *.ass *.vtt")])
+        if not srt:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        self._tarefa(self.legendas_log, "Queimar Legendas",
+                     lambda log: SubtitlesAI(log).queimar_legendas_no_video(Path(v), Path(srt), Path(s)),
+                     f"Legendas queimadas: {Path(s).name}")
 
     def converter_vertical(self):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-        def t():
-            try:
-                self.vertical.converter(Path(v), Path(s), self.vertical_modo.get(), self.vertical_blur.get())
-                messagebox.showinfo("Sucesso", "Convertido!")
-            except Exception as e:
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        modo, blur = CropMode(self.vertical_modo.get()), self.vertical_blur.get()
+        self._tarefa(self.vertical_log, "Vertical",
+                     lambda log: VerticalConverter(log).converter(Path(v), Path(s), modo, adicionar_blur_fundo=blur),
+                     f"Convertido: {Path(s).name}")
 
+    # ============================================================ acoes: upscale / stems / rostos
     def fazer_upscale(self, escala):
-        if self.upscaler is None: messagebox.showerror("Erro", "Upscaler nao disponivel."); return
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-        def t():
-            try:
-                self.upscaler.upscale(Path(v), Path(s), escala, self.upscale_gpu.get())
-                messagebox.showinfo("Sucesso", "Upscale concluido!")
-            except Exception as e:
-                self.upscale_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        if self.upscaler is None:
+            messagebox.showerror("Erro", "Upscaler nao disponivel (veja o log).")
+            return
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        gpu = self.upscale_gpu.get()
+
+        def fn(log):
+            self.upscaler.log = log
+            return self.upscaler.upscale(Path(v), Path(s), escala, gpu)
+        self._tarefa(self.upscale_log, "Upscale", fn, f"Upscale {escala} concluido: {Path(s).name}")
 
     def separar_vocais(self):
-        if self.stems is None: messagebox.showerror("Erro", "pip install demucs"); return
-        a = filedialog.askopenfilename(title="Audio/Video", filetypes=[("Audio/Video","*.mp3 *.wav *.mp4 *.mov *.avi *.mkv *.m4a *.flac")])
-        if not a: return
+        if not self._ok(self.stems, "demucs_disponivel"):
+            messagebox.showerror("Erro", "pip install demucs")
+            return
+        a = self._abrir("Audio/Video", MIDIA)
+        if not a:
+            return
         p = filedialog.askdirectory(title="Pasta de saida")
-        if not p: return
-        def t():
-            try:
-                ap, pp = Path(a), Path(p)
-                self.stems.separar_vocals_instrumental(ap, pp/f"{ap.stem}_VOCALS.wav", pp/f"{ap.stem}_INSTRUMENTAL.wav")
-                messagebox.showinfo("Sucesso", "Separacao concluida!")
-            except Exception as e:
-                self.stems_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        if not p:
+            return
+        ap, pp = Path(a), Path(p)
+        self._tarefa(self.stems_log, "Stems",
+                     lambda log: self.stems.separar_vocals_instrumental(ap, pp / f"{ap.stem}_VOCALS.wav",
+                                                                        pp / f"{ap.stem}_INSTRUMENTAL.wav"),
+                     "Separacao concluida!")
 
     def separar_todos_stems(self):
-        if self.stems is None: messagebox.showerror("Erro", "pip install demucs"); return
-        a = filedialog.askopenfilename(title="Audio/Video", filetypes=[("Audio/Video","*.mp3 *.wav *.mp4 *.mov *.avi *.mkv *.m4a *.flac")])
-        if not a: return
+        if not self._ok(self.stems, "demucs_disponivel"):
+            messagebox.showerror("Erro", "pip install demucs")
+            return
+        a = self._abrir("Audio/Video", MIDIA)
+        if not a:
+            return
         p = filedialog.askdirectory(title="Pasta de saida")
-        if not p: return
-        def t():
-            try:
-                stems = self.stems.separar_stems(Path(a), Path(p), "htdemucs")
-                messagebox.showinfo("Sucesso", f"{len(stems)} stems gerados!")
-            except Exception as e:
-                self.stems_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        if not p:
+            return
+        self._tarefa(self.stems_log, "Stems", lambda log: self.stems.separar_stems(Path(a), Path(p), "htdemucs"),
+                     lambda r: f"{len(r)} stems gerados!")
 
+    def restaurar_rostos(self):
+        if not self._ok(self.face_restore, "gfpgan_disponivel"):
+            messagebox.showerror("Erro", "pip install gfpgan")
+            return
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        gpu = self.face_gpu.get()
+
+        def fn(log):
+            self.face_restore.log = log
+            return self.face_restore.restaurar_video(Path(v), Path(s), gpu)
+        self._tarefa(self.face_log, "Face Restore", fn, "Rostos restaurados!")
+
+    # ============================================================ acoes: whisper turbo / x
     def gerar_legendas_turbo(self):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar SRT", defaultextension=".srt", filetypes=[("SRT","*.srt")])
-        if not s: return
-        self.turbo_log.delete(1.0, tk.END)
-        def t():
-            try:
-                from faster_whisper import WhisperModel
-                device = self.turbo_device.get()
-                compute = "float16" if device == "cuda" else "int8"
-                model = WhisperModel(self.turbo_modelo.get(), device=device, compute_type=compute)
-                segments, info = model.transcribe(str(v), language=self.turbo_idioma.get(), beam_size=5)
-                with open(s, "w", encoding="utf-8") as f:
-                    for i, seg in enumerate(segments, 1):
-                        f.write(f"{i}\n{self._format_timestamp(seg.start)} --> {self._format_timestamp(seg.end)}\n{seg.text.strip()}\n\n")
-                        self.turbo_log.insert(tk.END, f"[{self._format_timestamp(seg.start)}] {seg.text.strip()}\n")
-                        self.turbo_log.see(tk.END)
-                        self.app.root.update_idletasks()
-                messagebox.showinfo("Sucesso", "Legendas geradas!")
-            except Exception as e:
-                self.turbo_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        if not _instalado("faster_whisper"):
+            messagebox.showerror("Erro", "pip install faster-whisper")
+            return
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar("Salvar SRT", ".srt", [("SRT", "*.srt")])
+        if not s:
+            return
+        modelo, idioma = self.turbo_modelo.get(), self.turbo_idioma.get()
+        device = self.turbo_device.get()
+        if device == "auto":
+            device = "cuda" if self._cuda() else "cpu"
 
+        def fn(log):
+            from faster_whisper import WhisperModel
+            compute = "float16" if device == "cuda" else "int8"
+            log(f"faster-whisper {modelo} em {device} ({compute})...")
+            model = WhisperModel(modelo, device=device, compute_type=compute)
+            segments, _ = model.transcribe(str(v), language=idioma, beam_size=5, vad_filter=True)
+            n = 0
+            with open(s, "w", encoding="utf-8") as f:
+                for n, seg in enumerate(segments, 1):
+                    f.write(f"{n}\n{self._format_timestamp(seg.start)} --> {self._format_timestamp(seg.end)}\n"
+                            f"{seg.text.strip()}\n\n")
+                    log(f"[{self._format_timestamp(seg.start)}] {seg.text.strip()}")
+            return n
+        self._tarefa(self.turbo_log, "Legendas Turbo", fn, lambda n: f"{n} legendas geradas em {Path(s).name}", limpar=True)
+
+    def gerar_karaoke(self):
+        if not _instalado("whisperx"):
+            messagebox.showerror("Erro", "pip install whisperx")
+            return
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar("Salvar ASS", ".ass", [("ASS", "*.ass")])
+        if not s:
+            return
+        idioma, modelo = self.whisperx_idioma.get(), self.whisperx_modelo.get()
+        device = "cuda" if self._cuda() else "cpu"
+
+        def fn(log):
+            import whisperx
+            compute = "float16" if device == "cuda" else "int8"
+            log(f"WhisperX {modelo} em {device} ({compute})...")
+            model = whisperx.load_model(modelo, device, compute_type=compute, language=idioma)
+            audio = whisperx.load_audio(str(v))
+            result = model.transcribe(audio, language=idioma)
+            ma, meta = whisperx.load_align_model(language_code=idioma, device=device)
+            result = whisperx.align(result["segments"], ma, meta, audio, device)
+            n = 0
+            with open(s, "w", encoding="utf-8-sig") as f:
+                f.write("[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\n"
+                        "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,"
+                        "Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,"
+                        "MarginL,MarginR,MarginV,Encoding\n"
+                        "Style: Default,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,2,2,10,10,60,1\n\n"
+                        "[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
+                for seg in result["segments"]:
+                    for w in seg.get("words", []):
+                        if "start" not in w or "end" not in w:   # numeros/simbolos sem alinhamento
+                            continue
+                        palavra = w["word"].strip().replace("{", "(").replace("}", ")").replace("\n", " ")
+                        f.write(f"Dialogue: 0,{self._format_ass_time(w['start'])},{self._format_ass_time(w['end'])},"
+                                f"Default,,0,0,0,,{palavra}\n")
+                        n += 1
+            return n
+        self._tarefa(self.whisperx_log, "WhisperX", fn, lambda n: f"Karaoke gerado ({n} palavras)")
+
+    # ============================================================ acoes: download
     def obter_info_video(self):
         url = self.download_url.get().strip()
-        if not url: messagebox.showwarning("Aviso", "Cole uma URL primeiro!"); return
-        if self.downloader is None: messagebox.showerror("Erro", "pip install yt-dlp"); return
-        def t():
-            try:
-                info = self.downloader.obter_info(url)
-                self.download_log.delete(1.0, tk.END)
-                for k in ["titulo","autor","duracao","plataforma","metodo"]:
-                    self.download_log.insert(tk.END, f"{k}: {info.get(k,'-')}\n")
-            except Exception as e:
-                self.download_log.insert(tk.END, f"[ERRO] {e}\n")
-        threading.Thread(target=t, daemon=True).start()
+        if not url:
+            messagebox.showwarning("Aviso", "Cole uma URL primeiro!")
+            return
+        if self.downloader is None:
+            messagebox.showerror("Erro", "Downloader indisponivel (veja o log).")
+            return
+
+        def fn(log):
+            self.downloader.log = log
+            info = self.downloader.obter_info(url)
+            for k in ["titulo", "autor", "duracao", "plataforma", "metodo"]:
+                log(f"{k}: {info.get(k, '-')}")
+            return info
+        self._tarefa(self.download_log, "Info", fn, lambda i: i.get("titulo", "ok"), limpar=True)
 
     def baixar_video(self):
         url = self.download_url.get().strip()
-        if not url: messagebox.showwarning("Aviso", "Cole uma URL primeiro!"); return
-        if self.downloader is None: messagebox.showerror("Erro", "Downloader indisponivel."); return
+        if not url:
+            messagebox.showwarning("Aviso", "Cole uma URL primeiro!")
+            return
+        if self.downloader is None:
+            messagebox.showerror("Erro", "Downloader indisponivel (veja o log).")
+            return
         p = filedialog.askdirectory(title="Pasta de destino")
-        if not p: return
-        def t():
-            try:
-                self.download_log.delete(1.0, tk.END)
-                self.download_log.insert(tk.END, f"Baixando: {url}\n")
-                arq = self.downloader.baixar_video(url, Path(p), self.download_qualidade.get())
-                self.download_log.insert(tk.END, f"[OK] {arq}\n")
-                messagebox.showinfo("Sucesso", "Baixado!")
-            except Exception as e:
-                self.download_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        if not p:
+            return
+        qualidade = self.download_qualidade.get()
+
+        def fn(log):
+            self.downloader.log = log
+            return self.downloader.baixar_video(url, Path(p), qualidade)
+        self._tarefa(self.download_log, "Download", fn, lambda a: f"Baixado: {a}", limpar=True)
 
     def baixar_playlist(self):
         url = self.download_url.get().strip()
-        if not url: messagebox.showwarning("Aviso", "Cole uma URL!"); return
-        if self.downloader is None: messagebox.showerror("Erro", "Downloader indisponivel."); return
+        if not url:
+            messagebox.showwarning("Aviso", "Cole uma URL!")
+            return
+        if self.downloader is None:
+            messagebox.showerror("Erro", "Downloader indisponivel (veja o log).")
+            return
         p = filedialog.askdirectory(title="Pasta de destino")
-        if not p: return
-        def t():
-            try:
-                arqs = self.downloader.baixar_playlist(url, Path(p), 10)
-                messagebox.showinfo("Sucesso", f"{len(arqs)} videos baixados!")
-            except Exception as e:
-                self.download_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        if not p:
+            return
 
-    def restaurar_rostos(self):
-        if self.face_restore is None: messagebox.showerror("Erro", "pip install gfpgan"); return
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-        def t():
-            try:
-                self.face_restore.restaurar_video(Path(v), Path(s))
-                messagebox.showinfo("Sucesso", "Rostos restaurados!")
-            except Exception as e:
-                self.face_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        def fn(log):
+            self.downloader.log = log
+            return self.downloader.baixar_playlist(url, Path(p), 10)
+        self._tarefa(self.download_log, "Playlist", fn, lambda a: f"{len(a)} videos baixados!", limpar=True)
 
-    def gerar_karaoke(self):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar ASS", defaultextension=".ass", filetypes=[("ASS","*.ass")])
-        if not s: return
-        def t():
-            try:
-                import whisperx
-                device = "cuda" if self.gpu.obter_melhor_gpu() else "cpu"
-                idioma = self.whisperx_idioma.get()
-                model = whisperx.load_model(self.whisperx_modelo.get(), device, language=idioma)
-                result = model.transcribe(str(v), language=idioma)
-                ma, meta = whisperx.load_align_model(language_code=idioma, device=device)
-                result = whisperx.align(result["segments"], ma, meta, str(v), device)
-                with open(s, "w", encoding="utf-8") as f:
-                    f.write("[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
-                    for seg in result["segments"]:
-                        for w in seg.get("words", []):
-                            f.write(f"Dialogue: 0,{self._format_ass_time(w['start'])},{self._format_ass_time(w['end'])},Default,,0,0,0,,{w['word'].strip()}\n")
-                messagebox.showinfo("Sucesso", "Karaoke gerado!")
-            except Exception as e:
-                self.whisperx_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+    # ============================================================ acoes: suite (FFmpeg)
+    def preview_moviepy(self):
+        """Preview (nome mantido): ffplay ou player do sistema. Sem moviepy."""
+        v = self._abrir("Video para preview")
+        if not v:
+            return
+        try:
+            info = info_midia(Path(v))
+            self._escrever(self.auto_suite_log, f"{Path(v).name}: {info['duracao']:.1f}s | "
+                                                f"{info['width']}x{info['height']} | {info['fps']:.2f} fps")
+            self._escrever(self.auto_suite_log, f"Abrindo com {abrir_no_player(Path(v))}...")
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("Preview", str(e))
+
+    def speed_ramp_moviepy(self):
+        """Velocidade constante via FFmpeg (setpts + atempo). Sem moviepy."""
+        v = self._abrir()
+        if not v:
+            return
+        vel = simpledialog.askfloat("Velocidade", "Velocidade (0.25 = 4x lento, 2.0 = 2x rapido):",
+                                    initialvalue=0.5, minvalue=0.1, maxvalue=8.0, parent=self.app.root)
+        if not vel:
+            return
+        s = self._salvar()
+        if not s:
+            return
+
+        def fn(log):
+            info = info_midia(Path(v))
+            cmd = ["ffmpeg", "-y", "-i", str(v), "-map", "0:v:0", "-vf", f"setpts=PTS/{vel}",
+                   "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+            if info["tem_audio"]:
+                cmd += ["-map", "0:a:0", "-af", cadeia_atempo(vel), "-c:a", "aac", "-b:a", "192k"]
+            executar_com_progresso(cmd + [str(s)], log, info["duracao"] / vel)
+            return s
+        self._tarefa(self.auto_suite_log, "Speed", fn, f"Velocidade {vel:.2f}x aplicada: {Path(s).name}", limpar=True)
+
+    def trim_moviepy(self):
+        """Corte preciso ao frame via FFmpeg. Sem moviepy."""
+        v = self._abrir()
+        if not v:
+            return
+        try:
+            duracao = info_midia(Path(v))["duracao"]
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("Erro", f"Nao foi possivel ler o video: {e}")
+            return
+        ini = simpledialog.askfloat("Cortar", f"Inicio (s) - duracao total {duracao:.1f}s:", initialvalue=0.0,
+                                    minvalue=0.0, maxvalue=duracao, parent=self.app.root)
+        if ini is None:
+            return
+        fim = simpledialog.askfloat("Cortar", "Fim (s):", initialvalue=round(duracao, 2),
+                                    minvalue=ini + 0.04, maxvalue=duracao, parent=self.app.root)
+        if fim is None:
+            return
+        s = self._salvar()
+        if not s:
+            return
+
+        def fn(log):
+            info = info_midia(Path(v))
+            cmd = ["ffmpeg", "-y", "-ss", f"{ini:.3f}", "-i", str(v), "-t", f"{fim - ini:.3f}", "-map", "0:v:0",
+                   "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+            cmd += ["-map", "0:a:0", "-c:a", "aac", "-b:a", "192k"] if info["tem_audio"] else []
+            executar_com_progresso(cmd + [str(s)], log, fim - ini)
+            return s
+        self._tarefa(self.auto_suite_log, "Trim", fn, f"Clipe cortado: {fim - ini:.1f}s", limpar=True)
+
+    def analisar_audio_pydub(self):
+        """Analise EBU R128 real (LUFS/LRA/true peak). Sem pydub."""
+        v = self._abrir("Audio/Video", MIDIA)
+        if not v:
+            return
+
+        def fn(log):
+            info = info_midia(Path(v))
+            if not info["tem_audio"]:
+                raise ValueError("Arquivo sem trilha de audio.")
+            m = medir_loudness(Path(v))
+            log("=" * 50)
+            log(f"ANALISE DE AUDIO - {Path(v).name}")
+            log(f"Duracao:      {info['duracao']:.1f}s | Sample rate: {info['sample_rate']} Hz")
+            if m["integrado"] is None:
+                log("Audio digitalmente mudo.")
+                return m
+            log(f"Loudness:     {m['integrado']:.1f} LUFS (integrado)")
+            log(f"Faixa (LRA):  {m['lra']:.1f} LU")
+            log(f"True peak:    {m['true_peak']:.1f} dBTP")
+            log("AVALIACAO POR PADRAO:")
+            for nome, (alvo, tp) in PADROES_LOUDNESS.items():
+                ok = abs(m["integrado"] - alvo) <= 1.0 and (m["true_peak"] or -99) <= tp
+                log(f"  {'[OK]' if ok else '[!] '} {nome:10s} alvo {alvo:.0f} LUFS / {tp:.0f} dBTP")
+            log("=" * 50)
+            return m
+        self._tarefa(self.auto_suite_log, "Analise de Audio", fn,
+                     lambda m: "Analise concluida" if m["integrado"] is None else f"{m['integrado']:.1f} LUFS",
+                     limpar=True)
+
+    def normalizar_audio_pydub(self):
+        """Normalizacao EBU R128 em 2 passadas; video copiado sem reencode."""
+        v = self._abrir("Audio/Video", MIDIA)
+        if not v:
+            return
+        tem_video = Path(v).suffix.lower() in (".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm")
+        tipos = MP4 + [("MOV", "*.mov")] if tem_video else [("MP3", "*.mp3"), ("WAV", "*.wav"), ("FLAC", "*.flac"), ("M4A", "*.m4a")]
+        s = self._salvar("Salvar", ".mp4" if tem_video else ".mp3", tipos)
+        if not s:
+            return
+        padrao = self.auto_audio_padrao.get()
+        alvo, tp = padrao_loudness(padrao)
+        self._tarefa(self.auto_suite_log, "Normalizar Audio",
+                     lambda log: normalizar_loudness(Path(v), Path(s), alvo, tp, log),
+                     f"Normalizado para {padrao} ({alvo:.0f} LUFS): {Path(s).name}", limpar=True)
 
     def editar_automatico_completo(self):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-        def t():
-            try:
-                from auto_editor_ai import AutoEditorAI
-                AutoEditorAI(self.log).editar_automatico(Path(v), Path(s), {"threshold_silencio":-35.0,"remover_pausas":True,"adicionar_transicoes":True,"transicao_tipo":"fade","transicao_duracao":0.5,"manter_minimo":1.0})
-                messagebox.showinfo("Sucesso", "Edicao concluida!")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        cfg = {"threshold_silencio": self.silencio_threshold.get(), "remover_pausas": True,
+               "adicionar_transicoes": True, "transicao_tipo": "fade", "transicao_duracao": 0.3,
+               "manter_minimo": 0.5}
+        self._tarefa(self.auto_suite_log, "Edicao Automatica",
+                     lambda log: AutoEditorAI(log).editar_automatico(Path(v), Path(s), cfg),
+                     "Edicao concluida!", limpar=True)
 
     def color_grading_automatico(self):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-        def t():
-            try:
-                from auto_color_ai import AutoColorAI
-                AutoColorAI(self.log).aplicar_color_auto(Path(v), Path(s), "auto")
-                messagebox.showinfo("Sucesso", "Color grading concluido!")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        self._tarefa(self.auto_suite_log, "Color Grading",
+                     lambda log: AutoColorAI(log).aplicar_color_auto(Path(v), Path(s), "auto"),
+                     "Color grading concluido!", limpar=True)
 
     def mixagem_automatica(self):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-        def t():
-            try:
-                from auto_audio_ai import AutoAudioAI
-                AutoAudioAI(self.log).mixar_automatico(Path(v), Path(s), self.auto_audio_padrao.get())
-                messagebox.showinfo("Sucesso", "Mixagem concluida!")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        v = self._abrir("Audio/Video", MIDIA)
+        if not v:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        padrao = self.auto_audio_padrao.get()
+        self._tarefa(self.auto_suite_log, "Mixagem",
+                     lambda log: AutoAudioAI(log).mixar_automatico(Path(v), Path(s), padrao),
+                     f"Mixagem concluida ({padrao})!", limpar=True)
 
     def legendas_automaticas(self):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
-        s = filedialog.asksaveasfilename(title="Salvar", defaultextension=".mp4", filetypes=[("MP4","*.mp4")])
-        if not s: return
-        def t():
-            try:
-                from auto_caption_ai import AutoCaptionAI
-                AutoCaptionAI(self.log).gerar_legendas_auto(Path(v), Path(s), "pt", "base", self.auto_caption_estilo.get() if hasattr(self, "auto_caption_estilo") else "simples")
-                messagebox.showinfo("Sucesso", "Legendas concluidas!")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        if not self._ok(self.subtitles, "whisper_disponivel"):
+            messagebox.showwarning("Aviso", "pip install openai-whisper")
+            return
+        v = self._abrir()
+        if not v:
+            return
+        s = self._salvar()
+        if not s:
+            return
+        estilo = self.auto_caption_estilo.get()
+        self._tarefa(self.auto_suite_log, "Legendas Automaticas",
+                     lambda log: AutoCaptionAI(log).gerar_legendas_auto(Path(v), Path(s), "pt", "base", estilo),
+                     "Legendas concluidas!", limpar=True)
 
     def converter_todas_plataformas(self):
-        v = filedialog.askopenfilename(title="Video", filetypes=[("Videos","*.mp4 *.mov *.avi *.mkv")])
-        if not v: return
+        v = self._abrir()
+        if not v:
+            return
         p = filedialog.askdirectory(title="Pasta de saida")
-        if not p: return
-        def t():
-            try:
-                from auto_format_ai import AutoFormatAI
-                arqs = AutoFormatAI(self.log).converter_todas_plataformas(Path(v), Path(p))
-                messagebox.showinfo("Sucesso", f"{len(arqs)} versoes geradas!")
-            except Exception as e:
-                self.auto_suite_log.insert(tk.END, f"[ERRO] {e}\n")
-                messagebox.showerror("Erro", str(e))
-        threading.Thread(target=t, daemon=True).start()
+        if not p:
+            return
+        self._tarefa(self.auto_suite_log, "Plataformas",
+                     lambda log: AutoFormatAI(log).converter_todas_plataformas(Path(v), Path(p)),
+                     lambda a: f"{len(a)} versoes geradas!", limpar=True)
 
+    # ============================================================ formatos de tempo
     def _format_timestamp(self, seconds):
-        h = int(seconds // 3600)
-        m = int((seconds % 3600) // 60)
-        s = int(seconds % 60)
-        ms = int((seconds - int(seconds)) * 1000)
+        ms_total = int(round(seconds * 1000))
+        h, ms_total = divmod(ms_total, 3_600_000)
+        m, ms_total = divmod(ms_total, 60_000)
+        s, ms = divmod(ms_total, 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     def _format_ass_time(self, seconds):
-        h = int(seconds // 3600)
-        m = int((seconds % 3600) // 60)
-        s = int(seconds % 60)
-        cs = int((seconds - int(seconds)) * 100)
+        cs_total = int(round(seconds * 100))
+        h, cs_total = divmod(cs_total, 360_000)
+        m, cs_total = divmod(cs_total, 6000)
+        s, cs = divmod(cs_total, 100)
         return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+V76Patch = V73Patch  # nome novo, mesma classe

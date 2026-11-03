@@ -1,0 +1,11 @@
+# Video Builder Pro v7.7 - dependencias principais (Python 3.10 a 3.13)
+# Programas externos obrigatorios: ffmpeg e ffprobe no PATH (ffplay opcional, para preview)
+#
+# v7.7 REMOVEU moviepy, pydub e ffmpeg-python: o moviepy 2.x mudou a API
+# (moviepy.editor/subclip/speedx nao existem mais) e o pydub depende do
+# modulo audioop, removido no Python 3.13. Tudo agora roda direto no FFmpeg.
+
+requests>=2.31          # aba IA (API do Claude)
+yt-dlp>=2025.10.0       # aba Download (atualize com frequencia: pip install -U yt-dlp)
+keyring>=25.0           # guarda a chave da API no cofre do sistema (sem ele: arquivo 600)
+numpy>=1.26             # multicam mais rapido e Face Restore
