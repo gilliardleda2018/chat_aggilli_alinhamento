@@ -1,0 +1,34 @@
+{
+  "nome": "Reels / TikTok / Shorts",
+  "descricao": "Vertical, ritmo rapido, gancho forte nos primeiros 3 s.",
+  "selecao": "melhores",
+  "resolucao": [
+    1080,
+    1920
+  ],
+  "fps": 30,
+  "enquadramento": "preencher",
+  "duracao_alvo": 45,
+  "plano_min": 0.8,
+  "plano_max": 6.0,
+  "gancho_max": 3.0,
+  "transicao": "",
+  "duracao_transicao": 0.0,
+  "look": "vibrant",
+  "look_intensidade": 0.5,
+  "padrao_audio": "YouTube",
+  "corte": {
+    "remover_vicios": true,
+    "remover_repeticoes": true,
+    "cortar_pausas": true,
+    "pausa_max": 0.35,
+    "pausa_alvo": 0.12
+  },
+  "nota_minima": 7.0,
+  "regras": [
+    "O primeiro trecho deve ser a frase mais forte/curiosa (gancho), mesmo fora da ordem original.",
+    "Escolha so os melhores momentos ate a duracao alvo.",
+    "Termine com uma frase de fechamento ou chamada para acao.",
+    "Prefira trechos curtos e completos."
+  ]
+}

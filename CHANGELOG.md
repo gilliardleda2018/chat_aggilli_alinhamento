@@ -1,5 +1,64 @@
 # Changelog - Video Builder Pro
 
+## [v7.8] - 2026-11-03 - Sprint A: Diretor IA (edicao autonoma)
+
+Branch `feat/v7.8-diretor-ia`, empilhada sobre `fix/v7.7-correcoes-auditoria` (PR #1).
+Objetivo: sair da "edicao por IA rudimentar" (so remover silencio por volume) para um fluxo de
+editor profissional: transcricao por palavra -> corte de fala -> diretor -> render -> revisor.
+
+### Garantia de "sem regressao"
+
+| Suite | Antes (v7.7, `775b23e`) | Depois (v7.8) |
+|---|---|---|
+| `tests/test_regressao.py` (15) | 15/15 | 15/15 |
+| `tests/test_defeitos.py` (53) | 53/53 | 53/53 |
+| `tests/test_diretor.py` (25, novos, IDs S01-S23) | - | 25/25 |
+| **Total** | 68/68 | **93/93** |
+
+As 20 abas da v7.7 nao mudaram: o Diretor e um **patch separado** (`v78_diretor.py`, 21a aba).
+`rodar_v77.py` continua abrindo a versao de 20 abas; `rodar_v78.py` abre as 21.
+
+### Decisoes (e por que)
+
+| Decisao | Motivo |
+|---|---|
+| Diretor escolhe **unidades** (frases ja limpas), nao tempos livres | Um LLM que devolve timestamps erra por decimos de segundo e corta palavras. Escolhendo so unidades pre-validadas, **nenhum corte cai no meio de palavra** por construcao (teste S05). |
+| Laco Diretor -> Render -> Revisor com nova tentativa | Padrao do `poseljacob/agentic-video-editor` (MIT). O Revisor junta nota tecnica (objetiva) e nota visual do Claude (subjetiva): 40% / 60%. |
+| Estilos em JSON (`estilos/`) e nao YAML | Sem dependencia nova (PyYAML). Conceito de estilo reutilizavel do FireRed-OpenStoryline (Apache-2.0). |
+| Varios backends de transcricao com cache | WhisperX e o mais preciso para corte, mas pesado; o app usa o melhor que estiver instalado. Cache porque transcrever e a etapa mais lenta e o Diretor replaneja. |
+| Funciona sem chave da API | Sem Claude: plano heuristico (densidade de fala) e revisao so tecnica. Nada quebra. |
+| Codigo proprio, nenhum trecho copiado | OpenMontage (AGPL-3.0) e RobustVideoMatting (GPL-3.0) foram estudados mas nao usados: copiar obrigaria o app a mudar de licenca. Os projetos MIT/Apache serviram de referencia de arquitetura. |
+| `ClaudeEngine.mensagem()` novo; `gerar()` intocado no comportamento | A visao precisa de blocos de imagem. `gerar()` agora delega a `mensagem()` com o MESMO corpo de requisicao (teste S19). |
+| `enquadramento` com padrao "ajustar" | Reels a partir de video 16:9 precisa recortar (preencher) ou desfocar; o padrao mantem as barras pretas da v7.7 (teste S20). Projetos .vbp.json antigos abrem como antes (S21). |
+
+### Adicionado
+
+| Arquivo | O que faz | Testes |
+|---|---|---|
+| `modules/transcricao.py` | Transcricao com tempo de cada palavra. Backends: whisperx > stable_whisper > faster_whisper > whisper. Interpola palavras sem tempo (numeros no WhisperX), cache em `~/.video_builder_pro/cache/transcricoes`. | S01-S03 |
+| `modules/corte_fala.py` | Corte bruto de fala: vicios ("eh", "hum", "ahn", "eee" alongado), repeticoes ("eu eu", "eu acho eu acho" -> mantem a ultima), falsas partidas ("pro-"), pausas longas (encurta), bordas, retakes (Claude, opcional). Palavras ambiguas ("e", "a", "ha", "um", "uhum") so saem quando alongadas/isoladas. Modo seguro se os vicios passarem de 35% da fala. | S04-S10 |
+| `modules/diretor_ia.py` | Indexador (unidades por frase ou por cena, folha de contato 1280 px), Diretor (Claude + heuristica, valida ids, ajusta duracao), Revisor (QC, duracao, ritmo, silencio residual + visao), orquestrador com versoes `_v1`, `_v2`... e relatorio. | S11-S18 |
+| `estilos/*.json` | `youtube_educativo`, `reels_dinamico` (9:16, 45 s, gancho 3 s), `depoimento` (fade, soft light), `podcast_cortes` (trecho continuo, fundo desfocado). Edite ou crie novos: aparecem na aba automaticamente. | S12 |
+| `v78_diretor.py` | Aba "Diretor IA": material, estilo, briefing, Analisar, Editar automaticamente, Enviar para a Timeline (ajuste fino manual), Abrir relatorio. | S22-S23 |
+| `rodar_v78.py` | Launcher com as 21 abas. | - |
+| Relatorio `<saida>.diretor.md` / `.json` | Para cada execucao: palavras removidas (tempo, motivo, texto), retakes, unidades escolhidas e por que, notas e problemas de cada versao. | S17 |
+
+### Alterado (aditivo, sem mudar comportamento existente)
+- `video_builder_pro_v7_suite.py`: `ClaudeEngine.mensagem()` (multimodal); `ProjectTimeline.enquadramento` +
+  combo "Enquadramento" na aba Projeto + render (`preencher`/`desfocar`); serializacao do projeto; `VERSAO = "7.8"`.
+
+### Corrigido durante o desenvolvimento (pego pelos testes antes do commit)
+- Corte de palavra no inicio/fim com pausa curta deixava 0,05 s da palavra removida (S05).
+- Id nao numerico na resposta de retakes descartava todos os retakes validos (S10).
+- Limite de seguranca contava silencio e retakes e entrava em modo seguro sem necessidade (S07, S10).
+
+### Limitacoes conhecidas
+- **Testado com Whisper e Claude simulados** (sem modelos nem chave no ambiente de teste). Validar com
+  gravacoes reais e a sua chave antes de uso em producao; ajustar `estilos/*.json` ao seu gosto.
+- O Diretor ve ate 4 arquivos por vez (folhas de contato) para controlar custo de tokens.
+- Retakes e revisao visual consomem a API do Claude (2 a 4 chamadas por versao).
+- Dicionario de vicios focado em portugues (+ alguns do ingles).
+
 ## [v7.7] - 2026-11-03 - Correcao de todos os defeitos da auditoria v7.6
 
 Origem: auditoria tecnica de 03/11/2026 sobre o commit `85c9ea4` (v7.6).

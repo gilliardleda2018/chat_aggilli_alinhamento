@@ -1,0 +1,34 @@
+{
+  "nome": "YouTube educativo",
+  "descricao": "Aula/tutorial horizontal: clareza acima de tudo, cortes secos, sem enrolacao.",
+  "selecao": "tudo",
+  "resolucao": [
+    1920,
+    1080
+  ],
+  "fps": 30,
+  "enquadramento": "ajustar",
+  "duracao_alvo": null,
+  "plano_min": 1.0,
+  "plano_max": 45.0,
+  "gancho_max": 15.0,
+  "transicao": "",
+  "duracao_transicao": 0.0,
+  "look": "",
+  "look_intensidade": 1.0,
+  "padrao_audio": "YouTube",
+  "corte": {
+    "remover_vicios": true,
+    "remover_repeticoes": true,
+    "cortar_pausas": true,
+    "pausa_max": 0.5,
+    "pausa_alvo": 0.25
+  },
+  "nota_minima": 7.0,
+  "regras": [
+    "Mantenha a ordem logica da explicacao.",
+    "Corte introducoes longas: o assunto deve aparecer nos primeiros 15 s.",
+    "Remova tangentes e frases sem informacao.",
+    "Nunca corte no meio de um raciocinio."
+  ]
+}
