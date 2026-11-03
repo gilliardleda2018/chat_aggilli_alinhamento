@@ -1,18 +1,22 @@
 # Logotipo da Aggilli (usado nos instaladores)
 
-Coloque aqui o arquivo **oficial**:
+Arquivos oficiais (fundo transparente), versionados no repositório:
 
-- `logo_aggilli.png` — PNG com fundo transparente, 512×512 px ou maior (ideal: 1024×1024), **ou**
-- `logo_aggilli.svg` — vetor (convertido com `rsvg-convert`).
+| Arquivo | Conteúdo | Uso |
+|---|---|---|
+| `logo_aggilli.png` | Símbolo + "AGGILLI INTELLIGENCE" (2100×615) | documentação; fallback de tudo |
+| `simbolo_aggilli.png` | Só o símbolo (o "A" com a folha) | ícone do app, atalhos, cabeçalho do instalador |
+| `texto_aggilli.png` | Só "AGGILLI INTELLIGENCE" | imagem lateral do instalador (abaixo do símbolo) |
 
-A partir dele, `instalador/gerar_icones.py` cria em `assets/gerados/` (pasta ignorada pelo git):
+**Origem e edição (03/11/2026):** logo enviado pelo usuário; a linha inferior "OBRAS INTELLIGENCE" foi
+removida a pedido. Símbolo e nome foram separados automaticamente (componentes conectados do canal alfa),
+preservando o brilho original. Os pixels totalmente transparentes têm a cor zerada, então nada fica
+escondido sob a transparência.
 
-| Arquivo | Uso |
-|---|---|
-| `icone.ico` (16–256 px) | ícone do `.exe`, do instalador e dos atalhos no Windows |
-| `icone_256.png` / `icone_512.png` | menu do Linux e ícone da janela do app |
-| `assistente_grande*.bmp` | imagem lateral do assistente de instalação (Windows) |
-| `assistente_pequeno*.bmp` | canto do cabeçalho do assistente (Windows) |
+Por que separar: o logo é horizontal (~3,4:1). Num ícone quadrado de 16–48 px, o nome vira um borrão;
+o símbolo continua reconhecível.
 
-Sem o logo, só é possível gerar build de **teste** (`--sem-logo`), com um monograma
-neutro "VB" que não representa a marca. Builds oficiais (tag `v*`) falham sem o logo.
+`instalador/gerar_icones.py` gera a partir deles, em `assets/gerados/` (pasta ignorada pelo git):
+`icone.ico` (16–256 px), `icone_256.png`, `icone_512.png` e as imagens do assistente do Windows (1x/2x DPI).
+
+Para trocar o logo: substitua os PNGs (mantendo os nomes) e gere uma nova tag `v*`.

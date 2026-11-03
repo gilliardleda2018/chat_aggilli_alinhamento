@@ -8,8 +8,8 @@ Branch `feat/instalador`, empilhada sobre `feat/v7.8-diretor-ia` (PR #2).
 | Suite | Antes | Depois |
 |---|---|---|
 | regressao + defeitos + diretor | 93/93 | 93/93 |
-| `tests/test_instalador.py` (novos, I01-I08) | - | 8/8 |
-| **Total** | 93 | **101/101** |
+| `tests/test_instalador.py` (novos, I01-I10) | - | 10/10 |
+| **Total** | 93 | **103/103** |
 O CI (`.github/workflows/video-builder-pro.yml`) passa a rodar a suite inteira em todo PR.
 
 ### Decisoes (e por que)
@@ -41,6 +41,18 @@ O CI (`.github/workflows/video-builder-pro.yml`) passa a rodar a suite inteira e
 - `modules/diretor_ia.py`: estilos do app + do usuario (I03). `luts_manager.py`: LUTs do usuario (I04).
   `upscaler.py`, `definitive_downloader.py`: caminhos via `pasta_app()`.
 - `rodar_v78.py`: FFmpeg embutido no PATH, icone da janela, `--verificar` (I05).
+
+### Logotipo (03/11/2026)
+- `assets/logo_aggilli.png`: logo enviado pelo usuario, **sem a linha "OBRAS INTELLIGENCE"** (removida a pedido).
+- `assets/simbolo_aggilli.png` e `assets/texto_aggilli.png`: simbolo e nome separados automaticamente.
+  Motivo: o logo e horizontal (~3,4:1); num icone de 16-48 px o nome vira borrao, o simbolo continua legivel.
+- `gerar_icones.py`: icones e cabecalho usam o simbolo; a imagem lateral empilha simbolo + nome (testes I09, I10).
+
+### Corrigido: repositorio nao clonava no Windows
+- O arquivo `projetos/video-builder-pro/projetos/video-builder-pro/Nota Esta versão é mantida como fallback
+  estável. Para novos recursos, use v7.2.` terminava em ponto, nome invalido no Windows: o `git clone`/checkout
+  falhava (detectado pelo job Windows do CI). Renomeado com `git mv` (historico preservado), conteudo intacto,
+  para `contexto_2026-10-23_empacotamento.md` (o conteudo e a nota de contexto do empacotamento de 23/10).
 
 ### Como publicar a versao oficial
 1. Adicionar `projetos/video-builder-pro/assets/logo_aggilli.png` (commit).

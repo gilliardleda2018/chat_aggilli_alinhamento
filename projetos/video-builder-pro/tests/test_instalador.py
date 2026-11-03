@@ -129,3 +129,37 @@ def test_I08_build_deb(tmp_path):
               "usr/share/icons/hicolor/256x256/apps/video-builder-pro.png",
               "opt/aggilli/video-builder-pro/VideoBuilderPro"):
         assert f in lista
+
+
+def test_I09_icone_usa_simbolo_e_lateral_empilha(tmp_path, monkeypatch):
+    """Logo horizontal: icone sai do SIMBOLO (legivel em 16 px); a lateral empilha simbolo + nome."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+    sys.path.insert(0, str(RAIZ / "instalador"))
+    import gerar_icones
+    importlib.reload(gerar_icones)
+    monkeypatch.setattr(gerar_icones, "ASSETS", tmp_path)
+    monkeypatch.setattr(gerar_icones, "SAIDA", tmp_path / "gerados")
+    Image.new("RGBA", (900, 260), (255, 0, 0, 255)).save(tmp_path / "logo_aggilli.png")       # vermelho
+    Image.new("RGBA", (300, 260), (0, 0, 255, 255)).save(tmp_path / "simbolo_aggilli.png")    # azul
+    Image.new("RGBA", (600, 180), (0, 255, 0, 255)).save(tmp_path / "texto_aggilli.png")      # verde
+    saida = gerar_icones.gerar()
+    centro = Image.open(saida / "icone_256.png").getpixel((128, 128))
+    assert centro[:3] == (0, 0, 255)                                   # icone = simbolo, nao o logo inteiro
+    lat = Image.open(saida / "assistente_grande.bmp").convert("RGB")
+    cores = {lat.getpixel((82, y)) for y in range(0, 314, 2)}
+    assert (0, 0, 255) in cores and (0, 255, 0) in cores and (255, 0, 0) not in cores
+
+
+def test_I10_logo_oficial_sem_linha_obras():
+    """A pedido (03/11/2026): logo sem 'OBRAS INTELLIGENCE' (linha inferior removida)."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+    import numpy as np
+    for nome in ("logo_aggilli.png", "simbolo_aggilli.png", "texto_aggilli.png"):
+        assert (RAIZ / "assets" / nome).is_file(), nome
+    a = np.array(Image.open(RAIZ / "assets" / "logo_aggilli.png"))
+    assert (a[a[:, :, 3] == 0][:, :3] == 0).all()                     # nada escondido sob a transparencia
+    linhas = np.where((a[:, 760:, 3] > 30).sum(1) > 0)[0]              # regiao do texto (direita)
+    blocos = np.split(linhas, np.where(np.diff(linhas) > 3)[0] + 1)
+    assert len(blocos) == 2                                            # so "AGGILLI" e "INTELLIGENCE"

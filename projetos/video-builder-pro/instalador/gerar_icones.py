@@ -3,9 +3,15 @@
 """
 Gera todos os icones e imagens do instalador a partir do logotipo da Aggilli.
 
-Entrada (coloque o arquivo oficial aqui):
-    assets/logo_aggilli.png    PNG, de preferencia fundo transparente, >= 512 px
-    (ou assets/logo_aggilli.svg, convertido com rsvg-convert se disponivel)
+Entrada (arquivos oficiais, fundo transparente):
+    assets/logo_aggilli.png     logo completo (simbolo + "AGGILLI INTELLIGENCE"); obrigatorio
+                                (ou assets/logo_aggilli.svg, convertido com rsvg-convert)
+    assets/simbolo_aggilli.png  so o simbolo (o "A" com a folha); opcional
+    assets/texto_aggilli.png    so o nome; opcional
+Por que separar: o logo e horizontal (~3,4:1). Reduzido a um icone quadrado de
+16-48 px, o nome vira um borrao; por isso icones usam o SIMBOLO e a imagem
+lateral do instalador empilha simbolo + nome. Sem as pecas opcionais, tudo
+e gerado a partir do logo completo.
 
 Saida (assets/gerados/, recriada a cada build):
     icone.ico                  Windows: 16, 24, 32, 48, 64, 128, 256 px
@@ -32,6 +38,25 @@ ASSETS = RAIZ / "assets"
 SAIDA = ASSETS / "gerados"
 COR_FUNDO = (18, 24, 38)         # fundo escuro neutro das imagens do assistente
 TAMANHOS_ICO = [16, 24, 32, 48, 64, 128, 256]
+
+
+def carregar_opcional(nome: str):
+    f = ASSETS / nome
+    return Image.open(f).convert("RGBA") if f.is_file() else None
+
+
+def empilhado(simbolo: Image.Image, texto: Image.Image, w: int, h: int) -> Image.Image:
+    """Imagem lateral (retrato): simbolo grande em cima, nome embaixo."""
+    tela = Image.new("RGB", (w, h), COR_FUNDO)
+    s = simbolo.copy()
+    s.thumbnail((int(w * 0.78), int(h * 0.42)), Image.LANCZOS)
+    t = texto.copy()
+    t.thumbnail((int(w * 0.88), int(h * 0.2)), Image.LANCZOS)
+    espaco = int(h * 0.04)
+    topo = int((h - (s.height + espaco + t.height)) * 0.42)
+    tela.paste(s, ((w - s.width) // 2, topo), s)
+    tela.paste(t, ((w - t.width) // 2, topo + s.height + espaco), t)
+    return tela
 
 
 def carregar_logo(sem_logo: bool) -> Image.Image:
@@ -90,15 +115,19 @@ def gerar(sem_logo: bool = False) -> Path:
     if logo.width < 256 or logo.height < 64:
         print(f"[AVISO] logo pequeno ({logo.width}x{logo.height}): o icone pode ficar borrado. Use >= 512 px.")
 
-    base = quadrado(logo, 512)
+    simbolo = carregar_opcional("simbolo_aggilli.png") or logo
+    texto = carregar_opcional("texto_aggilli.png")
+
+    base = quadrado(simbolo, 512, margem=0.04)
     base.save(SAIDA / "icone_512.png")
-    quadrado(logo, 256).save(SAIDA / "icone_256.png")
+    quadrado(simbolo, 256, margem=0.04).save(SAIDA / "icone_256.png")
     base.save(SAIDA / "icone.ico", sizes=[(t, t) for t in TAMANHOS_ICO])
-    # Inno Setup 6 escolhe a melhor resolucao para o DPI da tela entre as listadas
-    for nome, (w, h), ocup, y in (("assistente_grande", (164, 314), 0.8, 0.42),
-                                  ("assistente_pequeno", (55, 58), 0.9, 0.5)):
-        em_fundo(logo, w, h, ocup, y).save(SAIDA / f"{nome}.bmp")
-        em_fundo(logo, w * 2, h * 2, ocup, y).save(SAIDA / f"{nome}_2x.bmp")
+    # Inno Setup 6 escolhe a melhor resolucao para o DPI da tela (1x e 2x)
+    for mult, sufixo in ((1, ""), (2, "_2x")):
+        w, h = 164 * mult, 314 * mult
+        grande = empilhado(simbolo, texto, w, h) if texto else em_fundo(logo, w, h, 0.8, 0.42)
+        grande.save(SAIDA / f"assistente_grande{sufixo}.bmp")
+        em_fundo(simbolo, 55 * mult, 58 * mult, 0.9, 0.5).save(SAIDA / f"assistente_pequeno{sufixo}.bmp")
     if sem_logo and not (ASSETS / "logo_aggilli.png").is_file() and not (ASSETS / "logo_aggilli.svg").is_file():
         (SAIDA / "SEM_LOGO").write_text("Build de teste com monograma neutro. Nao publicar.\n", encoding="utf-8")
         print("[AVISO] Gerado com monograma neutro (build de teste, sem logotipo oficial).")
