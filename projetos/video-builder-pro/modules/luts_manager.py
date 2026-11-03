@@ -1,16 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LUTS MANAGER - Video Builder Pro v7.3
+LUTS MANAGER - Video Builder Pro v7.7
 Gerencia aplicacao de LUTs (.cube) e looks embutidos
+
+Correcoes v7.7 (ver CHANGELOG.md, secao "luts_manager.py"):
+  - Intensidade multiplicava os parametros do 'eq' pelo valor do slider:
+    contrast 1.15 x 0.5 = 0.575 (abaixo do neutro 1.0, o look INVERTIA).
+    Agora interpola a partir do valor neutro: neutro + (v - neutro) * i
+    (contrast/saturation/gamma neutro 1, brightness neutro 0), e o
+    colorbalance/vignette/unsharp/curves tambem respeitam a intensidade.
+  - Intensidade 0 devolve o video sem alteracao de cor.
+  - Caminho de .cube com ':' (Windows) ou apostrofo quebrava o lut3d:
+    usa escapar_caminho_filtro().
+  - Mistura parcial de .cube usava '-vf' com 'blend' sem formato comum;
+    agora e um filter_complex com format=gbrp nos dois ramos.
+  - Video sem audio: '-c:a copy' nao falha mais (mapeamento opcional).
+  - returncode verificado em preview/grade de teste.
 """
 
-import subprocess
-import tempfile
-from pathlib import Path
-from typing import List, Dict, Optional
-from dataclasses import dataclass
 import re
+import shutil
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional
+
+try:
+    from ffmpeg_utils import executar, escapar_caminho_filtro, info_midia, executar_com_progresso
+except ImportError:
+    from .ffmpeg_utils import executar, escapar_caminho_filtro, info_midia, executar_com_progresso
+
+# Valores neutros dos parametros ajustaveis (intensidade 0 => neutro)
+_NEUTRO = {"contrast": 1.0, "saturation": 1.0, "gamma": 1.0, "brightness": 0.0}
 
 
 @dataclass
@@ -171,179 +193,102 @@ class LUTManager:
 
     def aplicar_lut(self, video: Path, lut_nome: str,
                     saida: Path, intensidade: float = 1.0) -> Path:
-        """Aplica LUT ao video"""
+        """Aplica LUT (.cube) ou look embutido ao video."""
+        intensidade = max(0.0, min(1.0, float(intensidade)))
+        filtro = self.obter_filtro_ffmpeg(lut_nome, intensidade)
+        if lut_nome not in self.luts_personalizadas and self._id_embutido(lut_nome) is None:
+            self.log(f"AVISO: LUT '{lut_nome}' nao encontrada, usando cinematic")
+        info = info_midia(Path(video))
+        cmd = ["ffmpeg", "-y", "-i", str(video), "-filter_complex", f"[0:v]{filtro}[vout]",
+               "-map", "[vout]", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+               "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+        cmd += ["-map", "0:a:0?", "-c:a", "copy"] if info["tem_audio"] else ["-an"]
+        self.log(f"Aplicando '{lut_nome}' em {Path(video).name} (intensidade {intensidade:.2f})...")
+        executar_com_progresso(cmd + [str(saida)], self.log, info["duracao"])
+        return Path(saida)
 
-        # Verifica se e LUT personalizada
-        if lut_nome in self.luts_personalizadas:
-            return self._aplicar_lut_arquivo(
-                video, self.luts_personalizadas[lut_nome],
-                saida, intensidade
-            )
-
-        # Verifica se e look embutido
+    def _id_embutido(self, lut_nome: str) -> Optional[str]:
         for id_lut, info in self.LOOKS_EMBUTIDOS.items():
-            if info["nome"] == lut_nome or id_lut == lut_nome:
-                return self._aplicar_look_embutido(video, id_lut, saida, intensidade)
+            if lut_nome in (id_lut, info["nome"]):
+                return id_lut
+        return None
 
-        self.log(f"AVISO: LUT '{lut_nome}' nao encontrada, usando cinematic")
-        return self._aplicar_look_embutido(video, "cinematic", saida, intensidade)
+    # Mantidos por compatibilidade com a API v7.3 -------------------------
+    def _aplicar_look_embutido(self, video, look_id, saida, intensidade):
+        return self.aplicar_lut(video, look_id, saida, intensidade)
 
-    def _aplicar_look_embutido(self, video: Path, look_id: str,
-                                saida: Path, intensidade: float) -> Path:
-        """Aplica look embutido via filtro FFmpeg"""
-
-        filtro = self.LOOKS_EMBUTIDOS.get(look_id, self.LOOKS_EMBUTIDOS["cinematic"])["filtro"]
-
-        # Ajusta intensidade se necessario
-        if intensidade != 1.0:
-            filtro = self._ajustar_intensidade_filtro(filtro, intensidade)
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video),
-            "-vf", filtro,
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-            "-c:a", "copy",
-            str(saida)
-        ]
-
-        self.log(f"Aplicando look '{look_id}' em {video.name}...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            self.log(f"Erro: {result.stderr[:300]}")
-            raise Exception(f"Falha ao aplicar look: {result.stderr[:200]}")
-
-        return saida
-
-    def _aplicar_lut_arquivo(self, video: Path, lut_arquivo: Path,
-                              saida: Path, intensidade: float) -> Path:
-        """Aplica LUT de arquivo .cube"""
-
-        # FFmpeg lut3d nao suporta intensidade diretamente
-        # Podemos usar blend para misturar
-
-        if intensidade == 1.0:
-            filtro = f"lut3d=file='{lut_arquivo}':interp=trilinear"
-        else:
-            # Mistura LUT com original usando blend
-            filtro = (
-                f"[0:v]split[a][b];"
-                f"[a]lut3d=file='{lut_arquivo}':interp=trilinear[lut];"
-                f"[b][lut]blend=all_mode=normal:all_opacity={intensidade}"
-            )
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video),
-            "-vf", filtro,
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-            "-c:a", "copy",
-            str(saida)
-        ]
-
-        self.log(f"Aplicando LUT '{lut_arquivo.name}' (intensidade: {intensidade})...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            self.log(f"Erro: {result.stderr[:300]}")
-            raise Exception(f"Falha ao aplicar LUT: {result.stderr[:200]}")
-
-        return saida
+    def _aplicar_lut_arquivo(self, video, lut_arquivo, saida, intensidade):
+        nome = Path(lut_arquivo).stem
+        self.luts_personalizadas.setdefault(nome, Path(lut_arquivo))
+        return self.aplicar_lut(video, nome, saida, intensidade)
 
     def _ajustar_intensidade_filtro(self, filtro: str, intensidade: float) -> str:
-        """Ajusta intensidade de filtros eq/colorbalance"""
+        """Interpola cada parametro entre o neutro e o valor do look."""
+        i = max(0.0, min(1.0, float(intensidade)))
 
-        # Para eq, ajusta os valores numericos
-        if "eq=" in filtro:
-            def ajustar_valor(match):
-                param = match.group(1)
-                valor = float(match.group(2))
-                # Ajusta proporcionalmente a intensidade
-                novo_valor = valor * intensidade
-                return f"{param}={novo_valor:.3f}"
+        def _eq(m):
+            nome, valor = m.group(1), float(m.group(2))
+            neutro = _NEUTRO[nome]
+            return f"{nome}={neutro + (valor - neutro) * i:.4f}"
+        filtro = re.sub(r"\b(contrast|saturation|brightness|gamma)=(-?[\d.]+)", _eq, filtro)
 
-            filtro = re.sub(r'(contrast|saturation|brightness|gamma)=([\d.-]+)',
-                           ajustar_valor, filtro)
-
+        # colorbalance: neutro 0
+        filtro = re.sub(r"\b([rgb][smh])=(-?[\d.]+)",
+                        lambda m: f"{m.group(1)}={float(m.group(2)) * i:.4f}", filtro)
+        # unsharp=lx:ly:amount -> amount neutro 0
+        filtro = re.sub(r"unsharp=(\d+):(\d+):(-?[\d.]+)",
+                        lambda m: f"unsharp={m.group(1)}:{m.group(2)}:{float(m.group(3)) * i:.4f}", filtro)
+        # vignette=angulo -> angulo menor = mais forte; 0 desliga. Escala o angulo.
+        filtro = re.sub(r"vignette=PI/(\d+)",
+                        lambda m: f"vignette=angle={3.14159265 / float(m.group(1)) * i:.4f}", filtro)
         return filtro
 
-    def obter_filtro_ffmpeg(self, lut_nome: str, intensidade: float = 1.0) -> str:
-        """Retorna filtro FFmpeg para uso em filter_complex"""
+    def obter_filtro_ffmpeg(self, lut_nome: str, intensidade: float = 1.0, rotulo: str = "") -> str:
+        """Cadeia de filtros (sem rotulos de entrada/saida) para filter_complex.
 
-        # Verifica LUT personalizada
+        Para .cube com intensidade < 1 usa split + blend, por isso o retorno
+        deve ser usado como '[in]<filtro>[out]' dentro de um filter_complex.
+        'rotulo' torna unicos os rotulos internos quando o filtro aparece
+        varias vezes no mesmo grafo (um por clipe no render).
+        """
+        r = rotulo
+        i = max(0.0, min(1.0, float(intensidade)))
+        if i == 0.0:
+            return "null"
         if lut_nome in self.luts_personalizadas:
-            lut_arquivo = self.luts_personalizadas[lut_nome]
-            if intensidade == 1.0:
-                return f"lut3d=file='{lut_arquivo}':interp=trilinear"
-            else:
-                return (
-                    f"split[a][b];"
-                    f"[a]lut3d=file='{lut_arquivo}':interp=trilinear[lut];"
-                    f"[b][lut]blend=all_mode=normal:all_opacity={intensidade}"
-                )
-
-        # Verifica look embutido
-        for id_lut, info in self.LOOKS_EMBUTIDOS.items():
-            if info["nome"] == lut_nome or id_lut == lut_nome:
-                filtro = info["filtro"]
-                if intensidade != 1.0:
-                    filtro = self._ajustar_intensidade_filtro(filtro, intensidade)
-                return filtro
-
-        # Default
-        return self.LOOKS_EMBUTIDOS["cinematic"]["filtro"]
+            lut = f"lut3d=file={escapar_caminho_filtro(self.luts_personalizadas[lut_nome])}:interp=trilinear"
+            if i >= 1.0:
+                return lut
+            return (f"format=gbrp,split[_lo{r}][_lb{r}];[_lb{r}]{lut}[_ll{r}];"
+                    f"[_lo{r}][_ll{r}]blend=all_mode=normal:all_opacity={i:.4f},format=yuv420p")
+        id_lut = self._id_embutido(lut_nome) or "cinematic"
+        filtro = self.LOOKS_EMBUTIDOS[id_lut]["filtro"]
+        if i >= 1.0:
+            return filtro
+        filtro = self._ajustar_intensidade_filtro(filtro, i)
+        if "curves=" in filtro:  # curvas nao tem parametro numerico simples: mistura
+            return (f"format=gbrp,split[_co{r}][_cb{r}];[_cb{r}]{filtro}[_cl{r}];"
+                    f"[_co{r}][_cl{r}]blend=all_mode=normal:all_opacity={i:.4f},format=yuv420p")
+        return filtro
 
     def gerar_preview_lut(self, lut_nome: str, imagem_base: Optional[Path] = None) -> Path:
         """Gera preview da LUT em imagem"""
-
         if imagem_base is None:
-            # Usa imagem de teste padrao (grid de cores)
             imagem_base = self.temp_dir / "test_grid.png"
             self._criar_grid_teste(imagem_base)
-
-        saida = self.temp_dir / f"preview_{lut_nome}.png"
-
-        # Aplica LUT na imagem
-        if lut_nome in self.luts_personalizadas:
-            lut_arquivo = self.luts_personalizadas[lut_nome]
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", str(imagem_base),
-                "-vf", f"lut3d=file='{lut_arquivo}':interp=trilinear",
-                "-frames:v", "1",
-                str(saida)
-            ]
-        else:
-            filtro = self.obter_filtro_ffmpeg(lut_nome)
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", str(imagem_base),
-                "-vf", filtro,
-                "-frames:v", "1",
-                str(saida)
-            ]
-
-        subprocess.run(cmd, capture_output=True)
+        saida = self.temp_dir / f"preview_{re.sub(r'[^\w-]', '_', lut_nome)}.png"
+        executar(["ffmpeg", "-y", "-i", str(imagem_base), "-filter_complex",
+                  f"[0:v]{self.obter_filtro_ffmpeg(lut_nome)}[o]", "-map", "[o]",
+                  "-frames:v", "1", str(saida)], self.log)
         return saida
 
     def _criar_grid_teste(self, saida: Path):
         """Cria grid de cores para teste"""
+        executar(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:duration=1",
+                  "-frames:v", "1", str(saida)], self.log)
 
-        # Cria imagem com gradiente de cores para preview
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", "testsrc2=size=1280x720:duration=1",
-            "-frames:v", "1",
-            str(saida)
-        ]
-
-        subprocess.run(cmd, capture_output=True)
+    def cleanup(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def __del__(self):
-        try:
-            import shutil
-            shutil.rmtree(self.temp_dir)
-        except:
-            pass
+        self.cleanup()

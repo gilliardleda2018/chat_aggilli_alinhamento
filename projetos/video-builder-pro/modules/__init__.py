@@ -1,5 +1,8 @@
-"""Modulos Video Builder Pro v7.3
+"""Modulos Video Builder Pro v7.7
 Imports com fallback para uso standalone (sem pacote).
+Os modulos opcionais (upscaler, stems_separator, face_restore, auto_suite,
+definitive_downloader, ui_thread, ffmpeg_utils) sao importados diretamente
+por quem os usa.
 """
 
 try:

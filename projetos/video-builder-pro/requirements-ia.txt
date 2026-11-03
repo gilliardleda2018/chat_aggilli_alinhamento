@@ -1,0 +1,15 @@
+# Video Builder Pro v7.7 - modulos de IA OPCIONAIS (pesados: baixam PyTorch/modelos)
+# Instale so o que for usar. Cada aba mostra no "Status" se esta disponivel.
+
+openai-whisper          # Legendas AI e Legendas Automaticas
+faster-whisper          # Legendas Turbo
+whisperx                # Karaoke (timestamps por palavra)
+demucs                  # Audio Stems
+gfpgan                  # Face Restore (se der "functional_tensor": pip install "torchvision<0.17")
+insightface             # Vertical modo "smart" (deteccao de rosto)
+onnxruntime             #   (dependencia do insightface; use onnxruntime-gpu com CUDA)
+opencv-python           #   (leitura de quadros no modo smart)
+
+# Upscale AI usa o binario realesrgan-ncnn-vulkan (nao e pacote pip):
+#   https://github.com/xinntao/Real-ESRGAN/releases  -> coloque no PATH ou em ./bin/
+#   Sem ele, a aba faz upscale classico (FFmpeg lanczos).

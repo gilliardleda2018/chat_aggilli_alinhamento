@@ -1,18 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AUTO EDITOR - Video Builder Pro v7.3
-Remove silencios automaticamente e detecta cortes de cena
+AUTO EDITOR - Video Builder Pro v7.7
+Remove silencios automaticamente e detecta cortes de cena.
 Baseado em: github.com/Muzamil4266/Python-auto-video-editor
+
+Correcoes v7.7 (ver CHANGELOG.md, secao "auto_editor.py"):
+  - Cortes com "-ss depois de -i" + "-c copy" caiam no keyframe anterior
+    (trechos imprecisos/congelados). Agora o corte e feito num unico filtro
+    (trim/atrim + concat) com reencode: preciso ao frame.
+  - returncode de cada ffmpeg agora e verificado (antes falhava em silencio
+    e concatenava segmentos vazios).
+  - Video sem audio nao quebra mais (antes o silencedetect falhava).
+  - Novo detectar_cenas(): devolve cenas [{inicio, fim}] - a UI v7.6
+    chamava c.get('inicio') sobre floats e quebrava.
+  - aplicar_edicao_automatica usava o filtro inexistente 'abremoveloud'.
+  - Diretorio temporario removido com cleanup() explicito (alem do __del__).
 """
 
-import subprocess
-import tempfile
-import json
 import re
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+try:
+    from ffmpeg_utils import (executar, info_midia, duracao as _duracao,
+                              detectar_silencios as _detectar_silencios,
+                              inverter_intervalos, executar_com_progresso)
+except ImportError:  # importado como pacote (modules.auto_editor)
+    from .ffmpeg_utils import (executar, info_midia, duracao as _duracao,
+                               detectar_silencios as _detectar_silencios,
+                               inverter_intervalos, executar_com_progresso)
 
 
 @dataclass
@@ -30,76 +50,42 @@ class AutoEditor:
 
     def __init__(self, log_callback):
         self.log = log_callback
-        self.temp_dir = Path(tempfile.mkdtemp(prefix="vbp_auto_"))
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="vbp_autoedit_"))
 
+    # ------------------------------------------------------------ deteccao
     def detectar_silencios(self, video: Path,
-                          threshold_db: float = -35.0,
-                          duracao_minima: float = 0.5) -> List[Tuple[float, float]]:
+                           threshold_db: float = -35.0,
+                           duracao_minima: float = 0.5) -> List[Tuple[float, float]]:
         """Detecta silencios no video usando FFmpeg silencedetect"""
-
         self.log(f"Detectando silencios (threshold: {threshold_db}dB, min: {duracao_minima}s)...")
-
-        # FFmpeg silencedetect
-        cmd = [
-            "ffmpeg",
-            "-i", str(video),
-            "-af", f"silencedetect=noise={threshold_db}dB:d={duracao_minima}",
-            "-f", "null",
-            "-"
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        stderr = result.stderr
-
-        # Parse output
-        silencios = []
-        inicio_silencio = None
-
-        for line in stderr.split('\n'):
-            if "silence_start" in line:
-                match = re.search(r'silence_start:\s*([\d.]+)', line)
-                if match:
-                    inicio_silencio = float(match.group(1))
-
-            elif "silence_end" in line:
-                match = re.search(r'silence_end:\s*([\d.]+)', line)
-                if match and inicio_silencio is not None:
-                    fim_silencio = float(match.group(1))
-                    silencios.append((inicio_silencio, fim_silencio))
-                    inicio_silencio = None
-
+        silencios = _detectar_silencios(Path(video), threshold_db, duracao_minima)
         self.log(f"Encontrados {len(silencios)} silencios")
         return silencios
 
-    def detectar_cortes_cena(self, video: Path,
-                             threshold: float = 0.3) -> List[float]:
-        """Detecta cortes de cena usando FFmpeg scene detection"""
-
+    def detectar_cortes_cena(self, video: Path, threshold: float = 0.3) -> List[float]:
+        """Tempos (s) em que ha corte de cena. Mantido como List[float] (API v7.3)."""
         self.log(f"Detectando cortes de cena (threshold: {threshold})...")
-
-        # FFmpeg scene detection
-        cmd = [
-            "ffmpeg",
-            "-i", str(video),
-            "-vf", f"select='gt(scene,{threshold})',showinfo",
-            "-f", "null",
-            "-"
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        stderr = result.stderr
-
-        # Parse showinfo output
+        r = executar(["ffmpeg", "-hide_banner", "-nostats", "-i", str(video), "-an",
+                      "-vf", f"select='gt(scene,{threshold})',showinfo",
+                      "-f", "null", "-"])
         cortes = []
-        for line in stderr.split('\n'):
-            if "pts_time" in line:
-                match = re.search(r'pts_time:([\d.]+)', line)
-                if match:
-                    tempo = float(match.group(1))
-                    cortes.append(tempo)
-
+        for linha in r.stderr.splitlines():
+            if "Parsed_showinfo" in linha:
+                m = re.search(r"pts_time:\s*([\d.]+)", linha)
+                if m:
+                    cortes.append(float(m.group(1)))
         self.log(f"Encontrados {len(cortes)} cortes de cena")
         return cortes
+
+    def detectar_cenas(self, video: Path, threshold: float = 0.3) -> List[Dict[str, float]]:
+        """Cenas completas [{'inicio','fim','duracao'}] a partir dos cortes."""
+        total = _duracao(Path(video))
+        pontos = [0.0] + [c for c in self.detectar_cortes_cena(video, threshold) if 0 < c < total] + [total]
+        cenas = []
+        for ini, fim in zip(pontos, pontos[1:]):
+            if fim - ini > 0.04:  # ignora cortes duplicados no mesmo frame
+                cenas.append({"inicio": ini, "fim": fim, "duracao": fim - ini})
+        return cenas
 
     def gerar_decisoes_edicao(self, video: Path,
                               remover_silencios: bool = True,
@@ -108,227 +94,91 @@ class AutoEditor:
                               detectar_cortes: bool = True,
                               threshold_cena: float = 0.3) -> List[EditDecision]:
         """Gera lista de decisoes de edicao"""
-
         decisoes = []
-
-        # Obtem duracao total
-        duracao_total = self._obter_duracao(video)
-
-        # Detecta silencios
-        silencios = []
         if remover_silencios:
-            silencios = self.detectar_silencios(
-                video, threshold_silencio, duracao_minima_silencio
-            )
-
-        # Detecta cortes de cena
-        cortes = []
+            for ini, fim in self.detectar_silencios(video, threshold_silencio, duracao_minima_silencio):
+                decisoes.append(EditDecision("remover_silencio", ini, fim, fim - ini,
+                                             f"Remover silencio ({fim - ini:.1f}s)"))
         if detectar_cortes:
-            cortes = self.detectar_cortes_cena(video, threshold_cena)
-
-        # Cria decisoes para silencios
-        for inicio, fim in silencios:
-            decisoes.append(EditDecision(
-                tipo="remover_silencio",
-                inicio=inicio,
-                fim=fim,
-                duracao=fim - inicio,
-                descricao=f"Remover silencio ({fim - inicio:.1f}s)"
-            ))
-
-        # Cria decisoes para cortes de cena
-        for tempo in cortes:
-            decisoes.append(EditDecision(
-                tipo="corte_cena",
-                inicio=tempo,
-                fim=tempo + 0.1,
-                duracao=0.1,
-                descricao=f"Corte de cena detectado"
-            ))
-
-        # Ordena por tempo
+            for t in self.detectar_cortes_cena(video, threshold_cena):
+                decisoes.append(EditDecision("corte_cena", t, t + 0.1, 0.1, "Corte de cena detectado"))
         decisoes.sort(key=lambda d: d.inicio)
-
         return decisoes
 
+    # ------------------------------------------------------------ aplicacao
     def aplicar_edicao_automatica(self, video: Path, saida: Path,
                                   decisoes: List[EditDecision],
                                   manter_audio_original: bool = False) -> Path:
-        """Aplica decisoes de edicao no video"""
+        """Remove os trechos marcados como 'remover_silencio'."""
+        silencios = [(d.inicio, d.fim) for d in decisoes if d.tipo == "remover_silencio"]
+        return self._manter_trechos(Path(video), Path(saida),
+                                    inverter_intervalos(silencios, _duracao(Path(video))))
 
-        # Separa silencios para remover
-        silencios = [d for d in decisoes if d.tipo == "remover_silencio"]
-
-        if not silencios:
-            self.log("Nenhum silencio para remover")
-            # Copia video original
-            import shutil
-            shutil.copy(video, saida)
-            return saida
-
-        self.log(f"Removendo {len(silencios)} silencios...")
-
-        # Gera filtro para remover silencios
-        # Usa abremoveloud e compand para suavizar
-        filtro_audio = self._gerar_filtro_remover_silencios(silencios)
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video),
-            "-af", filtro_audio,
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k",
-            str(saida)
-        ]
-
-        self.log("Aplicando remocao de silencios...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            self.log(f"Erro: {result.stderr[:300]}")
-            raise Exception(f"Falha na edicao automatica: {result.stderr[:200]}")
-
-        return saida
-
-    def cortar_em_segmentos(self, video: Path,
-                           decisoes: List[EditDecision]) -> List[Path]:
-        """Corta video em segmentos baseado nas decisoes"""
-
-        # Obtem duracao total
-        duracao_total = self._obter_duracao(video)
-
-        # Cria segmentos (partes entre cortes)
+    def cortar_em_segmentos(self, video: Path, decisoes: List[EditDecision]) -> List[Path]:
+        """Corta o video em arquivos separados nos cortes de cena (precisao de frame)."""
+        total = _duracao(Path(video))
+        pontos = sorted({0.0, total, *[d.inicio for d in decisoes if d.tipo == "corte_cena"]})
+        tem_audio = info_midia(Path(video))["tem_audio"]
         segmentos = []
-        cortes = [0.0] + [d.inicio for d in decisoes if d.tipo == "corte_cena"] + [duracao_total]
-        cortes = sorted(set(cortes))
-
-        for i in range(len(cortes) - 1):
-            inicio = cortes[i]
-            fim = cortes[i + 1]
-
-            if fim - inicio > 0.5:  # Minimo 0.5s
-                segmento_path = self.temp_dir / f"segmento_{i:03d}.mp4"
-
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(video),
-                    "-ss", str(inicio),
-                    "-t", str(fim - inicio),
-                    "-c:v", "copy",
-                    "-c:a", "copy",
-                    str(segmento_path)
-                ]
-
-                subprocess.run(cmd, capture_output=True)
-                segmentos.append(segmento_path)
-
+        for i, (ini, fim) in enumerate(zip(pontos, pontos[1:])):
+            if fim - ini <= 0.5:
+                continue
+            seg = self.temp_dir / f"segmento_{i:03d}.mp4"
+            cmd = ["ffmpeg", "-y", "-ss", f"{ini:.3f}", "-i", str(video), "-t", f"{fim - ini:.3f}",
+                   "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p"]
+            cmd += ["-c:a", "aac", "-b:a", "192k"] if tem_audio else ["-an"]
+            executar(cmd + [str(seg)], self.log)
+            segmentos.append(seg)
         return segmentos
 
-    def _gerar_filtro_remover_silencios(self, silencios: List[Tuple[float, float]]) -> str:
-        """Gera filtro FFmpeg para remover silencios"""
-
-        # Usa compand para atenuar silencios
-        # Formato: compand=attacks=0:decays=0:points=-90/-90|0/-90
-
-        # Simplificado: usa abremoveloud para remover partes abaixo do threshold
-        filtro = "abremoveloud=tolerance=-30dB:overlap=0.5"
-
-        return filtro
-
     def remover_silencios_simples(self, video: Path, saida: Path,
-                                   threshold_db: float = -35.0,
-                                   duracao_minima: float = 0.5) -> Path:
-        """Metodo simplificado para remover silencios"""
-
-        self.log("Removendo silencios (metodo simples)...")
-
-        # Detecta silencios primeiro
+                                  threshold_db: float = -35.0,
+                                  duracao_minima: float = 0.5) -> Path:
+        """Remove silencios mantendo apenas os trechos com som (preciso ao frame)."""
+        video, saida = Path(video), Path(saida)
+        self.log("Removendo silencios...")
         silencios = self.detectar_silencios(video, threshold_db, duracao_minima)
-
         if not silencios:
-            self.log("Nenhum silencio encontrado")
-            import shutil
-            shutil.copy(video, saida)
+            self.log("Nenhum silencio encontrado - copiando o original")
+            shutil.copyfile(video, saida)
             return saida
+        trechos = inverter_intervalos(silencios, _duracao(video))
+        return self._manter_trechos(video, saida, trechos)
 
-        # Cria segmentos sem silencio
-        duracao_total = self._obter_duracao(video)
-        segmentos_sem_silencio = []
-        inicio_anterior = 0.0
-
-        for inicio, fim in silencios:
-            if inicio > inicio_anterior:
-                # Segmento com som
-                segmento_path = self.temp_dir / f"keep_{len(segmentos_sem_silencio):03d}.mp4"
-
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(video),
-                    "-ss", str(inicio_anterior),
-                    "-t", str(inicio - inicio_anterior),
-                    "-c:v", "copy",
-                    "-c:a", "copy",
-                    str(segmento_path)
-                ]
-
-                subprocess.run(cmd, capture_output=True)
-                segmentos_sem_silencio.append(segmento_path)
-
-            inicio_anterior = fim
-
-        # Ultimo segmento
-        if inicio_anterior < duracao_total:
-            segmento_path = self.temp_dir / f"keep_{len(segmentos_sem_silencio):03d}.mp4"
-
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", str(video),
-                "-ss", str(inicio_anterior),
-                "-t", str(duracao_total - inicio_anterior),
-                "-c:v", "copy",
-                "-c:a", "copy",
-                str(segmento_path)
-            ]
-
-            subprocess.run(cmd, capture_output=True)
-            segmentos_sem_silencio.append(segmento_path)
-
-        # Concatena segmentos
-        if len(segmentos_sem_silencio) > 1:
-            lista_concat = self.temp_dir / "concat.txt"
-            with open(lista_concat, 'w', encoding='utf-8') as f:
-                for seg in segmentos_sem_silencio:
-                    f.write(f"file '{seg}'\n")
-
-            cmd = [
-                "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0",
-                "-i", str(lista_concat),
-                "-c", "copy",
-                str(saida)
-            ]
-
-            subprocess.run(cmd, capture_output=True)
-        else:
-            import shutil
-            shutil.copy(segmentos_sem_silencio[0], saida)
-
+    def _manter_trechos(self, video: Path, saida: Path,
+                        trechos: List[Tuple[float, float]]) -> Path:
+        if not trechos:
+            raise ValueError("Nada para manter: o arquivo inteiro e silencio.")
+        info = info_midia(video)
+        partes, rotulos = [], []
+        for i, (ini, fim) in enumerate(trechos):
+            partes.append(f"[0:v]trim=start={ini:.3f}:end={fim:.3f},setpts=PTS-STARTPTS[v{i}]")
+            rot = f"[v{i}]"
+            if info["tem_audio"]:
+                partes.append(f"[0:a]atrim=start={ini:.3f}:end={fim:.3f},asetpts=PTS-STARTPTS[a{i}]")
+                rot += f"[a{i}]"
+            rotulos.append(rot)
+        a = 1 if info["tem_audio"] else 0
+        partes.append(f"{''.join(rotulos)}concat=n={len(trechos)}:v=1:a={a}[vout]" + ("[aout]" if a else ""))
+        script = self.temp_dir / "trechos.txt"
+        script.write_text(";\n".join(partes), encoding="utf-8")  # evita limite de linha de comando
+        cmd = ["ffmpeg", "-y", "-i", str(video), "-filter_complex_script", str(script),
+               "-map", "[vout]"]
+        cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"] if a else []
+        cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", str(saida)]
+        total = sum(f - i for i, f in trechos)
+        self.log(f"Mantendo {len(trechos)} trechos ({total:.1f}s de {info['duracao']:.1f}s)")
+        executar_com_progresso(cmd, self.log, total)
         self.log(f"Silencios removidos: {saida}")
         return saida
 
     def _obter_duracao(self, video: Path) -> float:
-        """Obtem duracao do video"""
-        cmd = [
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0", str(video)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return float(result.stdout.strip())
+        """Mantido por compatibilidade (v7.3)."""
+        return _duracao(Path(video))
+
+    def cleanup(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def __del__(self):
-        try:
-            import shutil
-            shutil.rmtree(self.temp_dir)
-        except:
-            pass
+        self.cleanup()

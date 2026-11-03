@@ -1,32 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VIDEO BUILDER PRO v7.0 - PROFESSIONAL SUITE
-Integração: video-automation + color-grading-pro + video-editor-senior + Claude AI
+VIDEO BUILDER PRO v7.7 - PROFESSIONAL SUITE
+Integracao: video-automation + color-grading-pro + video-editor-senior + Claude AI
+
+Correcoes v7.7 neste arquivo (detalhes em CHANGELOG.md, secao "base"):
+  RENDER  - clipes com resolucao/fps/codec diferentes geravam saida
+            dessincronizada (video 7,24 s x audio 3,04 s no teste); agora cada
+            clipe e normalizado no filter_complex (scale/pad/fps/aresample) e
+            unido pelo filtro concat (ou xfade). Respeita inicio/fim, velocidade,
+            speed ramp, look/LUT, ajustes de cor, EQ, trilha com ducking e
+            loudness alvo (2 passadas). Nao gera mais proxies inuteis.
+  QC      - true peak, LRA, black/freeze frames, quadros faltando e bitrate
+            reais; video sem audio era APROVADO (fallback -23 fixo) e agora
+            reprova; alvo de loudness segue o padrao do projeto; relatorio PDF.
+  CHAVE   - API key no cofre do sistema (keyring) quando disponivel; senao em
+            arquivo com permissao 600 (antes base64 em arquivo 644). A chave
+            nao e mais carregada no campo da tela.
+  THREADS - nenhuma thread de trabalho toca em widget (UIDispatcher).
+  UI      - Abrir/Salvar projeto, Timeline (in/out, ordem, ripple, velocidade,
+            speed ramp, multicam por audio, preview), aba Cor e aba Audio
+            ligadas ao render, fila de render processavel.
 """
 
-import os
-import sys
 import json
-import base64
-import subprocess
-import threading
-import tempfile
-import shutil
+import os
 import re
-import hashlib
-from pathlib import Path
-from datetime import datetime
-from typing import List, Dict, Optional, Callable, Any, Tuple, Union
-from dataclasses import dataclass, field
-from enum import Enum
+import shutil
+import sys
+import tempfile
+import threading
 import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 try:
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox, scrolledtext
+    from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 except ImportError:
-    print("ERRO: Tkinter nao encontrado!")
+    print("ERRO: Tkinter nao encontrado! (Linux: sudo apt install python3-tk)")
     sys.exit(1)
 
 try:
@@ -34,6 +49,21 @@ try:
 except ImportError:
     requests = None
 
+# Modulos compartilhados (pasta modules/ ao lado deste arquivo)
+_MODULOS = Path(__file__).resolve().parent / "modules"
+if str(_MODULOS) not in sys.path:
+    sys.path.insert(0, str(_MODULOS))
+
+from ffmpeg_utils import (FFmpegErro, abrir_no_player, cadeia_atempo, diretorio_config,  # noqa: E402
+                          executar, executar_com_progresso, info_midia, md5_arquivo,
+                          medir_loudness, normalizar_loudness, obter_logger, padrao_loudness,
+                          PADROES_LOUDNESS, proteger)
+from luts_manager import LUTManager  # noqa: E402
+from transitions_gl import GLTransition, GLTransitionsEngine  # noqa: E402
+from ui_thread import UIDispatcher  # noqa: E402
+
+VERSAO = "7.7"
+EXTS_VIDEO = (".mp4", ".mov", ".avi", ".mkv", ".mts", ".m4v", ".webm")
 
 # ============================================================
 # ENUMS PROFISSIONAIS
@@ -102,6 +132,7 @@ class RenderPreset(Enum):
     MASTER = "master"
 
 
+
 # ============================================================
 # DATACLASSES PROFISSIONAIS
 # ============================================================
@@ -134,6 +165,17 @@ class ClipTimeline:
     nome: str = ""
     camera_angle: int = 0
     speed: float = 1.0
+    # v7.7
+    rampa: List[Tuple[float, float]] = field(default_factory=list)   # [(t_relativo, velocidade)]
+    ajustes_cor: Dict[str, float] = field(default_factory=dict)      # eq por clipe (match/auto)
+    duracao_fonte: float = 0.0                                       # duracao do arquivo
+
+    def duracao_saida(self) -> float:
+        """Duracao no resultado final (considera in/out, velocidade e rampa)."""
+        dur = max(0.0, self.fim - self.inicio)
+        if self.rampa:
+            return SeniorEditorEngine.duracao_com_rampa(dur, self.rampa)
+        return dur / (self.speed or 1.0)
 
 
 @dataclass
@@ -170,13 +212,22 @@ class ProjectTimeline:
     autor: str = ""
     copyright: str = ""
     descricao: str = ""
+    # v7.7 - escolhas das abas Cor/Audio/Timeline que antes eram ignoradas
+    look: str = ""                      # id/nome de look ou LUT .cube ("" = nenhum)
+    look_intensidade: float = 1.0
+    ajustes_cor: Dict[str, float] = field(default_factory=dict)  # brightness/contrast/saturation
+    padrao_audio: str = "EBU R128"
+    normalizar_audio: bool = False
+    eq: Dict[str, float] = field(default_factory=dict)            # low/mid/high em dB
+    transicao: str = ""                 # id do GLTransitionsEngine ("" = corte seco)
+    duracao_transicao: float = 0.5
 
 
 @dataclass
 class QCReport:
-    loudness_integrated: float = 0.0
-    loudness_range: float = 0.0
-    true_peak: float = 0.0
+    loudness_integrated: Optional[float] = None
+    loudness_range: Optional[float] = None
+    true_peak: Optional[float] = None
     dropped_frames: int = 0
     black_frames: int = 0
     freeze_frames: int = 0
@@ -187,6 +238,87 @@ class QCReport:
     checksum_md5: str = ""
     aprovado: bool = False
     problemas: List[str] = field(default_factory=list)
+    # v7.7
+    avisos: List[str] = field(default_factory=list)
+    padrao: str = "EBU R128"
+    alvo_lufs: float = -23.0
+    tem_audio: bool = False
+    duracao: float = 0.0
+    arquivo: str = ""
+
+    def texto(self) -> str:
+        def f(v, un):
+            return f"{v:.1f} {un}" if isinstance(v, (int, float)) else "-"
+        status = "APROVADO" if self.aprovado else "REPROVADO"
+        linhas = ["=" * 58, "         RELATORIO DE QC - Video Builder Pro " + VERSAO, "=" * 58, "",
+                  f"  Arquivo:            {Path(self.arquivo).name}",
+                  f"  Duracao:            {self.duracao:.2f} s",
+                  f"  Resolucao:          {self.resolution}",
+                  f"  Codec:              {self.codec}",
+                  f"  Bitrate medio/max:  {self.bitrate_avg / 1e6:.2f} / {self.bitrate_max / 1e6:.2f} Mbps",
+                  f"  Padrao de audio:    {self.padrao} (alvo {self.alvo_lufs:.0f} LUFS)",
+                  f"  Loudness integrado: {f(self.loudness_integrated, 'LUFS')}",
+                  f"  Loudness range:     {f(self.loudness_range, 'LU')}",
+                  f"  True peak:          {f(self.true_peak, 'dBTP')}",
+                  f"  Quadros faltando:   {self.dropped_frames} (estimado)",
+                  f"  Trechos pretos:     {self.black_frames}",
+                  f"  Trechos congelados: {self.freeze_frames}", "",
+                  f"  MD5: {self.checksum_md5}", "", "=" * 58, f"  STATUS: {status}", "=" * 58]
+        if self.problemas:
+            linhas += ["", "PROBLEMAS:"] + [f"  - {p}" for p in self.problemas]
+        if self.avisos:
+            linhas += ["", "AVISOS:"] + [f"  - {a}" for a in self.avisos]
+        return "\n".join(linhas) + "\n"
+
+
+# ============================================================
+# SERIALIZACAO DE PROJETO (Abrir/Salvar - antes "em desenvolvimento")
+# ============================================================
+
+FORMATO_PROJETO = 1
+
+
+def timeline_para_dict(tl: ProjectTimeline) -> Dict:
+    def clip(c: ClipTimeline) -> Dict:
+        return {"arquivo": str(c.arquivo), "inicio": c.inicio, "fim": c.fim, "duracao": c.duracao,
+                "nome": c.nome, "speed": c.speed, "rampa": [list(p) for p in c.rampa],
+                "ajustes_cor": c.ajustes_cor, "color_grade": c.color_grade.value,
+                "camera_angle": c.camera_angle, "duracao_fonte": c.duracao_fonte}
+    d = {"formato": FORMATO_PROJETO, "versao_app": VERSAO, "salvo_em": datetime.now().isoformat(timespec="seconds"),
+         "clips": [clip(c) for c in tl.clips]}
+    for k in ("resolucao", "fps", "projeto_nome", "autor", "copyright", "descricao", "look",
+              "look_intensidade", "ajustes_cor", "padrao_audio", "normalizar_audio", "eq",
+              "transicao", "duracao_transicao"):
+        d[k] = getattr(tl, k)
+    d["resolucao"] = list(tl.resolucao)
+    d["music"] = None if tl.music is None else {
+        "arquivo": str(tl.music.arquivo), "volume": tl.music.volume, "ducking": tl.music.ducking,
+        "ducking_level": tl.music.ducking_level, "loop": tl.music.loop}
+    return d
+
+
+def timeline_de_dict(d: Dict) -> ProjectTimeline:
+    if d.get("formato", 1) > FORMATO_PROJETO:
+        raise ValueError("Projeto salvo por uma versao mais nova do Video Builder Pro.")
+    clips = []
+    for c in d.get("clips", []):
+        clips.append(ClipTimeline(
+            arquivo=Path(c["arquivo"]), inicio=float(c["inicio"]), fim=float(c["fim"]),
+            duracao=float(c.get("duracao", c["fim"] - c["inicio"])), nome=c.get("nome", ""),
+            speed=float(c.get("speed", 1.0)), rampa=[tuple(p) for p in c.get("rampa", [])],
+            ajustes_cor=c.get("ajustes_cor", {}), color_grade=ColorGrade(c.get("color_grade", "none")),
+            camera_angle=int(c.get("camera_angle", 0)), duracao_fonte=float(c.get("duracao_fonte", 0))))
+    tl = ProjectTimeline(clips=clips)
+    for k in ("fps", "projeto_nome", "autor", "copyright", "descricao", "look", "look_intensidade",
+              "ajustes_cor", "padrao_audio", "normalizar_audio", "eq", "transicao", "duracao_transicao"):
+        if k in d:
+            setattr(tl, k, d[k])
+    tl.resolucao = tuple(d.get("resolucao", (1920, 1080)))
+    if d.get("music"):
+        m = d["music"]
+        tl.music = MusicTrack(Path(m["arquivo"]), m.get("volume", 0.3), m.get("ducking", True),
+                              m.get("ducking_level", 0.15), m.get("loop", False))
+    return tl
 
 
 # ============================================================
@@ -194,44 +326,96 @@ class QCReport:
 # ============================================================
 
 class ConfigManager:
+    """Configuracao em ~/.video_builder_pro/config_v7.json.
+
+    v7.7: chaves de API ficam no cofre do sistema (pacote 'keyring':
+    Credential Manager no Windows, Secret Service/KWallet no Linux, Keychain
+    no macOS). Sem keyring, ficam no JSON (base64 = apenas ofuscacao) com
+    permissao 600. O diretorio fica com 700 e a gravacao e atomica.
+    """
+
+    SERVICO_KEYRING = "video-builder-pro"
+
     def __init__(self):
-        self.config_dir = Path.home() / ".video_builder_pro"
+        self.config_dir = diretorio_config()
         self.config_file = self.config_dir / "config_v7.json"
-        self.config_dir.mkdir(exist_ok=True)
         self.config = self._carregar()
+        proteger(self.config_file, 0o600)
 
     def _carregar(self) -> Dict:
         if self.config_file.exists():
             try:
-                with open(self.config_file, 'r', encoding='utf-8') as f:
+                with open(self.config_file, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except:
+            except (OSError, ValueError) as e:
+                obter_logger().error("config corrompida (%s): usando padrao", e)
                 return {}
         return {}
 
     def salvar(self):
+        tmp = self.config_file.with_suffix(".tmp")
         try:
-            with open(self.config_file, 'w', encoding='utf-8') as f:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=2)
-        except Exception as e:
-            print(f"Erro ao salvar: {e}")
+            os.replace(tmp, self.config_file)
+            proteger(self.config_file, 0o600)
+        except OSError as e:
+            obter_logger().error("erro ao salvar config: %s", e)
+
+    @staticmethod
+    def _keyring():
+        try:
+            import keyring
+            backend = keyring.get_keyring()
+            # backends "fail"/"null" nao guardam nada
+            if "fail" in type(backend).__module__ or "null" in type(backend).__module__:
+                return None
+            return keyring
+        except Exception:  # noqa: BLE001 - keyring ausente ou sem backend
+            return None
 
     def _encode(self, texto: str) -> str:
-        return base64.b64encode(texto.encode('utf-8')).decode('ascii')
+        import base64
+        return base64.b64encode(texto.encode("utf-8")).decode("ascii")
 
     def _decode(self, texto: str) -> str:
+        import base64
         try:
-            return base64.b64decode(texto.encode('ascii')).decode('utf-8')
-        except:
+            return base64.b64decode(texto.encode("ascii")).decode("utf-8")
+        except (ValueError, UnicodeError):
             return ""
 
+    def onde_esta_chave(self, provedor: str) -> str:
+        kr = self._keyring()
+        if kr and kr.get_password(self.SERVICO_KEYRING, provedor):
+            return "cofre do sistema"
+        if self.config.get("api_keys", {}).get(provedor):
+            return f"arquivo {self.config_file} (permissao 600)"
+        return ""
+
     def get_api_key(self, provedor: str) -> str:
+        kr = self._keyring()
+        if kr:
+            try:
+                v = kr.get_password(self.SERVICO_KEYRING, provedor)
+                if v:
+                    return v
+            except Exception:  # noqa: BLE001
+                pass
         return self._decode(self.config.get("api_keys", {}).get(provedor, ""))
 
     def set_api_key(self, provedor: str, key: str):
-        if "api_keys" not in self.config:
-            self.config["api_keys"] = {}
-        self.config["api_keys"][provedor] = self._encode(key)
+        kr = self._keyring()
+        if kr:
+            try:
+                kr.set_password(self.SERVICO_KEYRING, provedor, key)
+                self.config.get("api_keys", {}).pop(provedor, None)  # migra: remove do arquivo
+                self.salvar()
+                return
+            except Exception as e:  # noqa: BLE001
+                obter_logger().warning("keyring falhou (%s): gravando no arquivo 600", e)
+        self.config.setdefault("api_keys", {})[provedor] = self._encode(key)
         self.salvar()
 
     def get(self, chave: str, default: Any = None) -> Any:
@@ -265,30 +449,22 @@ class ClaudeEngine:
 
     def gerar(self, prompt: str, system: str = "", max_tokens: int = 2000) -> str:
         if requests is None:
-            raise Exception("Pacote 'requests' nao instalado. Rode: pip install requests")
-
+            raise RuntimeError("Pacote 'requests' nao instalado. Rode: pip install requests")
         chave = self.config.get_api_key("claude")
         if not chave:
-            raise Exception("Chave da API nao configurada. Abra a aba IA e salve sua chave.")
-
-        headers = {
-            "x-api-key": chave,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        body = {
-            "model": self.modelo(),
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        }
+            raise RuntimeError("Chave da API nao configurada. Abra a aba IA e salve sua chave.")
+        headers = {"x-api-key": chave, "anthropic-version": "2023-06-01",
+                   "content-type": "application/json"}
+        body = {"model": self.modelo(), "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}]}
         if system:
             body["system"] = system
-
-        resp = requests.post(self.url, headers=headers, json=body, timeout=120)
-
+        try:
+            resp = requests.post(self.url, headers=headers, json=body, timeout=120)
+        except Exception as e:  # noqa: BLE001 - rede/timeout/DNS
+            raise RuntimeError(f"Falha de conexao com a API: {e}") from e
         if resp.status_code != 200:
-            raise Exception(f"Erro da API ({resp.status_code}): {resp.text[:300]}")
-
+            raise RuntimeError(f"Erro da API ({resp.status_code}): {resp.text[:300]}")
         dados = resp.json()
         partes = [b.get("text", "") for b in dados.get("content", []) if b.get("type") == "text"]
         return "".join(partes).strip()
@@ -343,70 +519,107 @@ class VideoAutomationEngine:
         self.log = log_callback
         self.temp_dir = Path(tempfile.mkdtemp(prefix="vbp_auto_"))
         self.fila_render: List[Dict] = []
+        self.proxies: Dict[str, Path] = {}   # original -> proxy (usado pelo preview)
 
     def criar_proxy(self, video: Path, resolucao: str = "1280x720") -> Path:
-        proxy_path = self.temp_dir / f"proxy_{video.stem}.mp4"
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video),
-            "-vf", f"scale={resolucao.replace('x', ':')}",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-            "-c:a", "aac", "-b:a", "128k",
-            str(proxy_path)
-        ]
-        subprocess.run(cmd, capture_output=True)
+        """Proxy leve para preview fluido (o render final usa sempre o original)."""
+        video = Path(video)
+        proxy_path = self.temp_dir / f"proxy_{abs(hash(str(video)))}_{video.stem}.mp4"
+        w, h = resolucao.split("x")
+        cmd = ["ffmpeg", "-y", "-i", str(video), "-map", "0:v:0", "-map", "0:a:0?",
+               "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+               "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+               "-c:a", "aac", "-b:a", "128k", str(proxy_path)]
+        executar(cmd, self.log)
+        self.proxies[str(video)] = proxy_path
         return proxy_path
 
     def adicionar_a_fila(self, projeto: Dict):
+        """projeto = {'nome', 'saida', 'preset', 'timeline': timeline_para_dict(...)}"""
         self.fila_render.append(projeto)
-        self.log(f"Projeto adicionado a fila: {projeto.get('nome', 'Sem nome')}")
+        self.log(f"Projeto adicionado a fila ({len(self.fila_render)}): {projeto.get('nome', 'Sem nome')}")
 
-    def processar_fila(self, callback_progresso: Callable = None):
+    def processar_fila(self, renderizar: Callable[[ProjectTimeline, Path, "RenderPreset"], Path],
+                       callback_progresso: Callable = None) -> List[Tuple[str, bool, str]]:
+        """Renderiza cada projeto da fila. Antes so registrava no log, sem render."""
+        resultados = []
         total = len(self.fila_render)
-        for i, projeto in enumerate(self.fila_render):
-            self.log(f"Renderizando {i+1}/{total}: {projeto['nome']}")
+        while self.fila_render:
+            projeto = self.fila_render.pop(0)
+            i = total - len(self.fila_render)
+            nome = projeto.get("nome", "Sem nome")
+            self.log(f"[FILA] Renderizando {i}/{total}: {nome}")
+            try:
+                tl = timeline_de_dict(projeto["timeline"])
+                preset = RenderPreset[projeto.get("preset", "FAST")]
+                renderizar(tl, Path(projeto["saida"]), preset)
+                resultados.append((nome, True, str(projeto["saida"])))
+            except Exception as e:  # noqa: BLE001 - um projeto ruim nao para a fila
+                self.log(f"[FILA] Falhou '{nome}': {e}")
+                resultados.append((nome, False, str(e)))
             if callback_progresso:
-                callback_progresso((i+1)/total * 100)
+                callback_progresso(i / total * 100)
+        return resultados
 
     def exportar_edl_xml(self, timeline: ProjectTimeline, saida: Path,
-                          formato: str = "premiere") -> Path:
+                         formato: str = "premiere") -> Path:
         return self._exportar_premiere_xml(timeline, saida)
 
     def _exportar_premiere_xml(self, timeline: ProjectTimeline, saida: Path) -> Path:
+        """FCP7 XML (xmeml v4), importavel no Premiere e no DaVinci Resolve.
+
+        v7.7: inclui in/out/start/end (antes so a duracao fixa de 10 s), taxa
+        da sequencia, e 'pathurl' como URI valida (file:///C:/..., espacos
+        codificados) - antes "file://C:\\..." nao era encontrado.
+        """
+        fps = int(timeline.fps)
+
+        def rate(pai):
+            r = ET.SubElement(pai, "rate")
+            ET.SubElement(r, "timebase").text = str(fps)
+            ET.SubElement(r, "ntsc").text = "FALSE"
+
         xmeml = ET.Element("xmeml", version="4")
-        sequence = ET.SubElement(xmeml, "sequence")
-        ET.SubElement(sequence, "name").text = timeline.projeto_nome
-        media = ET.SubElement(sequence, "media")
-        video_track = ET.SubElement(media, "video")
-        track = ET.SubElement(video_track, "track")
-
+        seq = ET.SubElement(xmeml, "sequence")
+        ET.SubElement(seq, "name").text = timeline.projeto_nome or "Sequencia"
+        rate(seq)
+        media = ET.SubElement(seq, "media")
+        fmt = ET.SubElement(ET.SubElement(media, "video"), "format")
+        sc = ET.SubElement(fmt, "samplecharacteristics")
+        ET.SubElement(sc, "width").text = str(timeline.resolucao[0])
+        ET.SubElement(sc, "height").text = str(timeline.resolucao[1])
+        track = ET.SubElement(media.find("video"), "track")
+        pos = 0
         for i, clip in enumerate(timeline.clips):
-            clipitem = ET.SubElement(track, "clipitem", id=f"clipitem-{i}")
-            ET.SubElement(clipitem, "name").text = clip.nome
-            ET.SubElement(clipitem, "duration").text = str(int(clip.duracao * timeline.fps))
-            file_elem = ET.SubElement(clipitem, "file", id=f"file-{i}")
-            ET.SubElement(file_elem, "pathurl").text = f"file://{clip.arquivo}"
-            rate = ET.SubElement(file_elem, "rate")
-            ET.SubElement(rate, "timebase").text = str(timeline.fps)
-            ET.SubElement(rate, "ntsc").text = "FALSE"
-
-        tree = ET.ElementTree(xmeml)
-        tree.write(saida, encoding="UTF-8", xml_declaration=True)
+            ini_f, fim_f = int(round(clip.inicio * fps)), int(round(clip.fim * fps))
+            dur_f = max(1, fim_f - ini_f)
+            item = ET.SubElement(track, "clipitem", id=f"clipitem-{i + 1}")
+            ET.SubElement(item, "name").text = clip.nome or Path(clip.arquivo).name
+            ET.SubElement(item, "duration").text = str(int(round((clip.duracao_fonte or clip.fim) * fps)))
+            rate(item)
+            ET.SubElement(item, "start").text = str(pos)
+            ET.SubElement(item, "end").text = str(pos + dur_f)
+            ET.SubElement(item, "in").text = str(ini_f)
+            ET.SubElement(item, "out").text = str(fim_f)
+            f = ET.SubElement(item, "file", id=f"file-{i + 1}")
+            ET.SubElement(f, "name").text = Path(clip.arquivo).name
+            ET.SubElement(f, "pathurl").text = Path(clip.arquivo).resolve().as_uri()
+            rate(f)
+            pos += dur_f
+        ET.SubElement(seq, "duration").text = str(pos)
+        ET.indent(xmeml) if hasattr(ET, "indent") else None
+        ET.ElementTree(xmeml).write(saida, encoding="UTF-8", xml_declaration=True)
         self.log(f"EDL exportado: {saida}")
-        return saida
+        return Path(saida)
 
     def gerar_checksum(self, arquivo: Path) -> str:
-        hash_md5 = hashlib.md5()
-        with open(arquivo, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
+        return md5_arquivo(Path(arquivo))
+
+    def cleanup(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def __del__(self):
-        try:
-            shutil.rmtree(self.temp_dir)
-        except:
-            pass
+        self.cleanup()
 
 
 # ============================================================
@@ -414,92 +627,103 @@ class VideoAutomationEngine:
 # ============================================================
 
 class ColorGradingEngine:
+    """v7.7: delega ao LUTManager (antes havia uma copia dos mesmos filtros)
+    e implementa de verdade a analise de luminosidade e o match de cameras
+    (antes valores fixos)."""
+
     def __init__(self, log_callback: Callable):
         self.log = log_callback
-        self.luts_disponiveis: Dict[str, Path] = {}
+        self.luts = LUTManager(log_callback)
+        self.luts_disponiveis: Dict[str, Optional[Path]] = {}
         self.carregar_luts()
 
     def carregar_luts(self):
-        self.luts_disponiveis = {
-            "cinematic": None,
-            "orange_teal": None,
-            "film_noir": None,
-            "vintage": None,
-        }
+        self.luts_disponiveis = {l.nome: l.arquivo for l in self.luts.listar_luts()}
 
-    def aplicar_lut(self, video: Path, lut: Union[str, Path],
-                    saida: Path, intensidade: float = 1.0) -> Path:
-        if isinstance(lut, str) and lut in self.luts_disponiveis:
-            return self._aplicar_look_embutido(video, saida, lut, intensidade)
+    def aplicar_lut(self, video: Path, lut: Union[str, Path], saida: Path, intensidade: float = 1.0) -> Path:
+        lut_path = Path(str(lut))
+        if lut_path.suffix.lower() == ".cube" and lut_path.exists():
+            self.luts.adicionar_lut_personalizada(lut_path.stem, lut_path)
+            lut = lut_path.stem
+        return self.luts.aplicar_lut(Path(video), str(lut), Path(saida), intensidade)
 
-        lut_path = Path(lut)
-        if not lut_path.exists():
-            self.log(f"LUT nao encontrado: {lut_path}, usando filtro embutido")
-            return self._aplicar_look_embutido(video, saida, "cinematic", intensidade)
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video),
-            "-vf", f"lut3d=file='{lut_path}':interp=trilinear",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-            "-c:a", "copy",
-            str(saida)
-        ]
-        subprocess.run(cmd, capture_output=True)
-        return saida
-
-    def _aplicar_look_embutido(self, video: Path, saida: Path,
-                                 look: str, intensidade: float) -> Path:
-        filtros = {
-            "cinematic": "eq=contrast=1.15:saturation=0.85:gamma=0.95,colorbalance=rs=-0.02:gs=0.0:bs=0.03,vignette=PI/4",
-            "orange_teal": "colorbalance=rs=0.15:gs=0.05:bs=-0.1:rm=0.1:gm=0.0:bm=-0.05:rh=0.05:gh=0.0:bh=-0.1",
-            "film_noir": "hue=s=0,eq=contrast=1.3:brightness=-0.05:gamma=1.1",
-            "vibrant": "eq=contrast=1.2:saturation=1.4:brightness=0.05",
-            "warm": "eq=contrast=1.1:saturation=1.1:gamma=1.05,colorbalance=rs=0.1:gs=0.05:bs=-0.05",
-        }
-        filtro = filtros.get(look, filtros["cinematic"])
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video),
-            "-vf", filtro,
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-            "-c:a", "copy",
-            str(saida)
-        ]
-        subprocess.run(cmd, capture_output=True)
-        return saida
-
-    def corrigir_exposicao(self, video: Path, saida: Path,
-                            alvo_ire: float = 50.0) -> Path:
-        analise = self._analisar_luminosidade(video)
-        diferenca = alvo_ire - analise["media_ire"]
-        correcao_db = diferenca * 0.02
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video),
-            "-vf", f"eq=brightness={correcao_db}",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-            "-c:a", "copy",
-            str(saida)
-        ]
-        subprocess.run(cmd, capture_output=True)
-        return saida
+    def _analisar_sinal(self, video: Path, amostras_por_seg: float = 1.0) -> Dict[str, float]:
+        r = executar(["ffmpeg", "-hide_banner", "-nostats", "-i", str(video), "-an",
+                      "-vf", f"fps={amostras_por_seg},signalstats,metadata=print:file=-",
+                      "-f", "null", "-"])
+        vals: Dict[str, List[float]] = {}
+        for linha in r.stdout.splitlines():
+            m = re.match(r"lavfi\.signalstats\.(YAVG|YMIN|YMAX|UAVG|VAVG|SATAVG)=([\d.]+)", linha.strip())
+            if m:
+                vals.setdefault(m.group(1), []).append(float(m.group(2)))
+        if "YAVG" not in vals:
+            raise RuntimeError(f"Nao foi possivel analisar {Path(video).name}")
+        return {k: sum(v) / len(v) for k, v in vals.items()}
 
     def _analisar_luminosidade(self, video: Path) -> Dict:
-        return {"media_ire": 45.0, "min_ire": 10.0, "max_ire": 90.0}
+        """IRE aproximado a partir do luma 8 bits (16 = 0 IRE, 235 = 100 IRE)."""
+        s = self._analisar_sinal(video)
 
-    def match_cameras(self, video_referencia: Path, video_alvo: Path,
-                       saida: Path) -> Path:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video_alvo),
-            "-vf", "colorbalance=rs=0.05:gs=0.02:bs=-0.03",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-            "-c:a", "copy",
-            str(saida)
-        ]
-        subprocess.run(cmd, capture_output=True)
-        return saida
+        def ire(y):
+            return max(0.0, min(100.0, (y - 16.0) / 219.0 * 100.0))
+        return {"media_ire": ire(s["YAVG"]), "min_ire": ire(s.get("YMIN", 16)),
+                "max_ire": ire(s.get("YMAX", 235))}
+
+    def calcular_exposicao(self, video: Path, alvo_ire: float = 50.0) -> Dict[str, float]:
+        analise = self._analisar_luminosidade(video)
+        brilho = max(-0.3, min(0.3, (alvo_ire - analise["media_ire"]) / 100.0 * 0.8))
+        self.log(f"Exposicao: media {analise['media_ire']:.0f} IRE -> alvo {alvo_ire:.0f} IRE "
+                 f"(brightness {brilho:+.3f})")
+        return {"brightness": round(brilho, 4)}
+
+    def corrigir_exposicao(self, video: Path, saida: Path, alvo_ire: float = 50.0) -> Path:
+        c = self.calcular_exposicao(video, alvo_ire)
+        info = info_midia(Path(video))
+        cmd = ["ffmpeg", "-y", "-i", str(video), "-map", "0:v:0", "-vf", f"eq=brightness={c['brightness']}",
+               "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+        cmd += ["-map", "0:a:0", "-c:a", "copy"] if info["tem_audio"] else []
+        executar(cmd + [str(saida)], self.log)
+        return Path(saida)
+
+    def calcular_match(self, video_referencia: Path, video_alvo: Path) -> Dict[str, float]:
+        """Aproxima o alvo da referencia: brilho (Y medio), saturacao e
+        balanco de cor de meios-tons (U/V medios). E uma correcao global
+        aproximada, nao um match por histograma."""
+        ref, alvo = self._analisar_sinal(video_referencia), self._analisar_sinal(video_alvo)
+        aj = {"brightness": round(max(-0.3, min(0.3, (ref["YAVG"] - alvo["YAVG"]) / 255.0)), 4)}
+        if alvo.get("SATAVG", 0) > 1 and ref.get("SATAVG"):
+            aj["saturation"] = round(max(0.5, min(2.0, ref["SATAVG"] / alvo["SATAVG"])), 4)
+        # U (Cb) maior = mais azul; V (Cr) maior = mais vermelho
+        du = (ref.get("UAVG", 128) - alvo.get("UAVG", 128)) / 128.0
+        dv = (ref.get("VAVG", 128) - alvo.get("VAVG", 128)) / 128.0
+        aj["rm"] = round(max(-0.5, min(0.5, dv)), 4)
+        aj["bm"] = round(max(-0.5, min(0.5, du)), 4)
+        aj["gm"] = round(max(-0.5, min(0.5, -(du + dv) / 2)), 4)
+        return aj
+
+    def match_cameras(self, video_referencia: Path, video_alvo: Path, saida: Path) -> Path:
+        aj = self.calcular_match(video_referencia, video_alvo)
+        self.log(f"Match de cameras: {aj}")
+        info = info_midia(Path(video_alvo))
+        cmd = ["ffmpeg", "-y", "-i", str(video_alvo), "-map", "0:v:0", "-vf", filtro_ajustes(aj),
+               "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+        cmd += ["-map", "0:a:0", "-c:a", "copy"] if info["tem_audio"] else []
+        executar(cmd + [str(saida)], self.log)
+        return Path(saida)
+
+
+def filtro_ajustes(aj: Dict[str, float]) -> str:
+    """eq (brightness/contrast/saturation/gamma) + colorbalance (rm/gm/bm)."""
+    partes = []
+    eq = {k: aj[k] for k in ("brightness", "contrast", "saturation", "gamma") if k in aj}
+    neutro = {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "gamma": 1.0}
+    eq = {k: v for k, v in eq.items() if abs(v - neutro[k]) > 1e-4}
+    if eq:
+        partes.append("eq=" + ":".join(f"{k}={v}" for k, v in eq.items()))
+    cb = {k: aj[k] for k in ("rs", "gs", "bs", "rm", "gm", "bm", "rh", "gh", "bh") if abs(aj.get(k, 0)) > 1e-4}
+    if cb:
+        partes.append("colorbalance=" + ":".join(f"{k}={v}" for k, v in cb.items()))
+    return ",".join(partes) or "null"
 
 
 # ============================================================
@@ -507,62 +731,197 @@ class ColorGradingEngine:
 # ============================================================
 
 class SeniorEditorEngine:
+    """Operacoes de edicao sobre a timeline sequencial (sem buracos).
+
+    v7.7: ripple/slide/slip/multicam/speed ramp eram stubs ou estavam errados
+    (ripple subtraia o ponto de corte do inicio de cada clipe, mexendo no
+    material de origem em vez da posicao na timeline).
+    """
+
     def __init__(self, log_callback: Callable):
         self.log = log_callback
 
-    def ripple_edit(self, timeline: ProjectTimeline,
-                     ponto_corte: float) -> ProjectTimeline:
-        novos_clips = []
-        for clip in timeline.clips:
-            if clip.inicio >= ponto_corte:
-                clip.inicio -= ponto_corte
-                clip.fim -= ponto_corte
-            novos_clips.append(clip)
-        timeline.clips = novos_clips
-        return timeline
+    # ---------------------------------------------------- posicoes
+    @staticmethod
+    def posicoes(timeline: ProjectTimeline) -> List[Tuple[float, float]]:
+        """(inicio, fim) de cada clipe NA TIMELINE (tempo de saida)."""
+        res, t = [], 0.0
+        for c in timeline.clips:
+            d = c.duracao_saida()
+            res.append((t, t + d))
+            t += d
+        return res
+
+    def ripple_edit(self, timeline: ProjectTimeline, ponto_corte: float,
+                    duracao: Optional[float] = None) -> ProjectTimeline:
+        """Ripple delete. Sem 'duracao': remove o clipe que contem o ponto.
+        Com 'duracao': remove o trecho [ponto, ponto+duracao] da timeline,
+        dividindo clipes se preciso; o restante 'anda' para fechar o buraco."""
+        if duracao is None:
+            for i, (a, b) in enumerate(self.posicoes(timeline)):
+                if a <= ponto_corte < b:
+                    removido = timeline.clips.pop(i)
+                    self.log(f"Ripple: removido '{removido.nome}' ({b - a:.2f}s)")
+                    break
+            return self._recalcular(timeline)
+        fim_corte = ponto_corte + duracao
+        novos: List[ClipTimeline] = []
+        for c, (a, b) in zip(timeline.clips, self.posicoes(timeline)):
+            if b <= ponto_corte or a >= fim_corte or c.rampa:
+                novos.append(c)
+                continue
+            esc = c.speed or 1.0
+            if a < ponto_corte:     # parte antes do corte
+                antes = ClipTimeline(**{**c.__dict__, "fim": c.inicio + (ponto_corte - a) * esc})
+                novos.append(antes)
+            if b > fim_corte:       # parte depois do corte
+                depois = ClipTimeline(**{**c.__dict__, "inicio": c.inicio + (fim_corte - a) * esc})
+                novos.append(depois)
+        timeline.clips = [self._sync_dur(c) for c in novos]
+        self.log(f"Ripple: removidos {duracao:.2f}s a partir de {ponto_corte:.2f}s")
+        return self._recalcular(timeline)
+
+    def ripple_delete(self, timeline: ProjectTimeline, indice: int) -> ProjectTimeline:
+        timeline.clips.pop(indice)
+        return self._recalcular(timeline)
 
     def slip_edit(self, clip: ClipTimeline, offset: float) -> ClipTimeline:
-        clip.inicio += offset
-        clip.fim += offset
+        """Desloca in/out dentro do material de origem, mantendo a duracao."""
+        dur = clip.fim - clip.inicio
+        limite = clip.duracao_fonte or (clip.fim + abs(offset))
+        novo_ini = max(0.0, min(clip.inicio + offset, limite - dur))
+        clip.inicio, clip.fim = novo_ini, novo_ini + dur
         return clip
 
-    def slide_edit(self, clip: ClipTimeline, offset: float) -> ClipTimeline:
-        return clip
+    def slide_edit(self, timeline: ProjectTimeline, indice: int, offset: float) -> ProjectTimeline:
+        """Move o clipe na timeline mantendo seu conteudo: o vizinho anterior
+        ganha/perde 'offset' no fim e o seguinte perde/ganha no inicio."""
+        if not 0 < indice < len(timeline.clips) - 1:
+            raise ValueError("Slide precisa de clipes vizinhos dos dois lados.")
+        ant, prox = timeline.clips[indice - 1], timeline.clips[indice + 1]
+        offset = max(-(ant.fim - ant.inicio - 0.1), min(offset, prox.fim - prox.inicio - 0.1))
+        if ant.duracao_fonte:
+            offset = min(offset, ant.duracao_fonte - ant.fim)
+        offset = max(offset, -prox.inicio)
+        ant.fim += offset
+        prox.inicio += offset
+        self._sync_dur(ant)
+        self._sync_dur(prox)
+        return self._recalcular(timeline)
 
-    def criar_multicam(self, angulos: List[Path],
-                        sincronizar_por: str = "audio") -> List[ClipTimeline]:
+    # ---------------------------------------------------- multicam
+    def criar_multicam(self, angulos: List[Path], sincronizar_por: str = "audio") -> List[ClipTimeline]:
+        """Clipes alinhados pelo audio: inicio de cada angulo ajustado para o
+        mesmo instante real; duracao = trecho comum a todos."""
+        infos = [info_midia(Path(a)) for a in angulos]
+        atrasos = [0.0] + [self._sincronizar_audio(Path(angulos[0]), Path(a)) for a in angulos[1:]]
+        base = min(atrasos)
+        inicios = [d - base for d in atrasos]
+        comum = min(inf["duracao"] - ini for inf, ini in zip(infos, inicios))
+        if comum <= 0:
+            raise ValueError("Os angulos nao tem trecho em comum.")
         clips = []
-        for i, angulo in enumerate(angulos):
-            offset = self._sincronizar_audio(angulos[0], angulo)
-            clip = ClipTimeline(
-                arquivo=angulo,
-                inicio=offset,
-                fim=offset + 10,
-                duracao=10,
-                camera_angle=i,
-                nome=f"Camera_{i+1}"
-            )
-            clips.append(clip)
+        for i, (a, ini, inf) in enumerate(zip(angulos, inicios, infos)):
+            self.log(f"Multicam: Camera_{i + 1} offset {ini:+.2f}s")
+            clips.append(ClipTimeline(arquivo=Path(a), inicio=round(ini, 3), fim=round(ini + comum, 3),
+                                      duracao=round(comum, 3), camera_angle=i, nome=f"Camera_{i + 1}",
+                                      duracao_fonte=inf["duracao"]))
         return clips
 
-    def _sincronizar_audio(self, ref: Path, alvo: Path) -> float:
-        return 0.0
+    @staticmethod
+    def _envelope(midia: Path, segundos: float = 90.0, taxa: int = 100) -> List[float]:
+        """Envelope de energia do audio (taxa amostras/s), via ffmpeg."""
+        import subprocess
+        sr = 8000
+        r = subprocess.run(["ffmpeg", "-v", "error", "-t", str(segundos), "-i", str(midia), "-vn",
+                            "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"], capture_output=True)
+        if r.returncode != 0 or not r.stdout:
+            raise RuntimeError(f"Sem audio para sincronizar em {Path(midia).name}")
+        import array
+        amostras = array.array("h", r.stdout)
+        passo = sr // taxa
+        env = []
+        for i in range(0, len(amostras) - passo + 1, passo):
+            bloco = amostras[i:i + passo]
+            env.append(sum(abs(x) for x in bloco) / passo)
+        # remove media e normaliza (correlacao robusta a ganho diferente)
+        m = sum(env) / len(env)
+        env = [e - m for e in env]
+        n = (sum(e * e for e in env) ** 0.5) or 1.0
+        return [e / n for e in env]
 
-    def criar_lower_third(self, texto: str, duracao: float,
-                           estilo: str = "moderno") -> TitleOverlay:
-        return TitleOverlay(
-            texto=texto,
-            inicio=0,
-            fim=duracao,
-            posicao="lower_third",
-            estilo=estilo,
-            tamanho=36,
-            animacao="slide"
-        )
+    def _sincronizar_audio(self, ref: Path, alvo: Path, max_lag: float = 10.0) -> float:
+        """Segundos em que o MESMO som aparece mais tarde no alvo que na
+        referencia (positivo = o alvo comecou a gravar antes). Correlacao
+        cruzada do envelope de energia a 100 Hz (resolucao de 10 ms)."""
+        taxa = 100
+        a, b = self._envelope(ref, taxa=taxa), self._envelope(alvo, taxa=taxa)
+        lag_max = int(max_lag * taxa)
+        try:
+            import numpy as np
+            corr = np.correlate(np.asarray(b), np.asarray(a), mode="full")
+            centro = len(a) - 1
+            janela = corr[max(0, centro - lag_max): centro + lag_max + 1]
+            melhor = int(np.argmax(janela)) + max(0, centro - lag_max) - centro
+        except ImportError:
+            melhor, melhor_v = 0, float("-inf")
+            for lag in range(-lag_max, lag_max + 1):
+                v = sum(b[i + lag] * a[i] for i in range(len(a)) if 0 <= i + lag < len(b))
+                if v > melhor_v:
+                    melhor, melhor_v = lag, v
+        return melhor / taxa
 
-    def speed_ramp(self, clip: ClipTimeline,
-                    pontos: List[Tuple[float, float]]) -> str:
-        return "setpts=0.5*PTS"
+    # ---------------------------------------------------- titulos / velocidade
+    def criar_lower_third(self, texto: str, duracao: float, estilo: str = "moderno") -> TitleOverlay:
+        return TitleOverlay(texto=texto, inicio=0, fim=duracao, posicao="lower_third",
+                            estilo=estilo, tamanho=36, animacao="slide")
+
+    @staticmethod
+    def _normalizar_rampa(pontos: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        pts = sorted((float(t), float(v)) for t, v in pontos)
+        if not pts or pts[0][0] > 0:
+            pts.insert(0, (0.0, pts[0][1] if pts else 1.0))
+        for _, v in pts:
+            if v <= 0:
+                raise ValueError("Velocidade da rampa deve ser > 0")
+        return pts
+
+    @classmethod
+    def duracao_com_rampa(cls, dur: float, pontos: List[Tuple[float, float]]) -> float:
+        pts = [p for p in cls._normalizar_rampa(pontos) if p[0] < dur]
+        total = 0.0
+        for (t, v), prox in zip(pts, pts[1:] + [(dur, None)]):
+            total += (prox[0] - t) / v
+        return total
+
+    def speed_ramp(self, clip: ClipTimeline, pontos: List[Tuple[float, float]]) -> str:
+        """Filtro setpts com velocidade constante por trecho.
+
+        pontos: [(t_relativo_ao_inicio_do_clipe, velocidade)], ex.
+        [(0, 1), (2, 0.5), (4, 2)] = normal ate 2 s, camera lenta ate 4 s,
+        depois 2x. Antes devolvia sempre 'setpts=0.5*PTS'.
+        """
+        pts = self._normalizar_rampa(pontos)
+        acumulado, trechos = 0.0, []
+        for (t, v), prox in zip(pts, pts[1:] + [(None, None)]):
+            trechos.append((t, v, acumulado))
+            if prox[0] is not None:
+                acumulado += (prox[0] - t) / v
+        expr = f"{trechos[-1][2]}+(T-{trechos[-1][0]})/{trechos[-1][1]}"
+        for k in range(len(trechos) - 2, -1, -1):
+            t, v, c = trechos[k]
+            expr = f"if(lt(T,{trechos[k + 1][0]}),{c}+(T-{t})/{v},{expr})"
+        return f"setpts='({expr})/TB'"
+
+    # ---------------------------------------------------- util
+    @staticmethod
+    def _sync_dur(c: ClipTimeline) -> ClipTimeline:
+        c.duracao = round(max(0.0, c.fim - c.inicio), 4)
+        return c
+
+    def _recalcular(self, timeline: ProjectTimeline) -> ProjectTimeline:
+        timeline.duracao_total = sum(c.duracao_saida() for c in timeline.clips)
+        return timeline
 
 
 # ============================================================
@@ -570,92 +929,173 @@ class SeniorEditorEngine:
 # ============================================================
 
 class QCEngine:
-    def __init__(self, log_callback: Callable):
-        self.log = log_callback
+    """v7.7: todas as metricas sao medidas (antes true peak, dropped e black
+    frames eram constantes) e o alvo segue o padrao de audio escolhido."""
 
-    def analisar_video(self, video: Path) -> QCReport:
-        report = QCReport()
-        report.loudness_integrated = self._analisar_loudness(video)
-        report.true_peak = self._analisar_true_peak(video)
-        report.dropped_frames = self._contar_dropped_frames(video)
-        report.black_frames = self._contar_black_frames(video)
+    TOLERANCIA_LU = 1.0
+
+    def __init__(self, log_callback: Callable, padrao: str = "EBU R128"):
+        self.log = log_callback
+        self.padrao = padrao
+
+    def analisar_video(self, video: Path, padrao: Optional[str] = None) -> QCReport:
+        video = Path(video)
+        padrao = padrao or self.padrao
+        alvo, tp_max = padrao_loudness(padrao)
+        info = info_midia(video)
+        report = QCReport(padrao=padrao, alvo_lufs=alvo, tem_audio=info["tem_audio"],
+                          duracao=info["duracao"], arquivo=str(video))
         report.resolution = self._obter_resolucao(video)
         report.codec = self._obter_codec(video)
+        self.log("QC: medindo loudness (EBU R128)...")
+        ld = medir_loudness(video)
+        report.loudness_integrated, report.loudness_range, report.true_peak = ld["integrado"], ld["lra"], ld["true_peak"]
+        if info["tem_video"]:
+            self.log("QC: procurando trechos pretos/congelados...")
+            report.black_frames, report.freeze_frames = self._contar_black_freeze(video)
+            report.dropped_frames = self._contar_dropped_frames(video, info)
+            report.bitrate_avg, report.bitrate_max = self._bitrates(video, info)
         report.checksum_md5 = self._calcular_checksum(video)
-        report.aprovado = self._verificar_aprovacao(report)
+        report.aprovado = self._verificar_aprovacao(report, tp_max)
         return report
 
-    def _analisar_loudness(self, video: Path) -> float:
-        cmd = [
-            "ffmpeg", "-i", str(video),
-            "-af", "loudnorm=I=-23:TP=-2:LRA=7:print_format=json",
-            "-f", "null", "-"
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        try:
-            match = re.search(r'"input_i"\s*:\s*"([-\d.]+)"', result.stderr)
-            if match:
-                return float(match.group(1))
-        except:
-            pass
-        return -23.0
+    # Mantido por compatibilidade (v7.3): retorna o valor medido ou None
+    def _analisar_loudness(self, video: Path) -> Optional[float]:
+        return medir_loudness(Path(video))["integrado"]
 
-    def _analisar_true_peak(self, video: Path) -> float:
-        return -2.0
+    def _analisar_true_peak(self, video: Path) -> Optional[float]:
+        return medir_loudness(Path(video))["true_peak"]
 
-    def _contar_dropped_frames(self, video: Path) -> int:
-        return 0
+    def _contar_black_freeze(self, video: Path) -> Tuple[int, int]:
+        r = executar(["ffmpeg", "-hide_banner", "-nostats", "-i", str(video), "-an", "-vf",
+                      "blackdetect=d=0.1:pix_th=0.10,freezedetect=n=-60dB:d=0.5", "-f", "null", "-"])
+        pretos = len(re.findall(r"black_start:", r.stderr))
+        congelados = len(re.findall(r"freeze_start:", r.stderr))
+        return pretos, congelados
 
     def _contar_black_frames(self, video: Path) -> int:
-        return 0
+        return self._contar_black_freeze(Path(video))[0]
+
+    def _contar_dropped_frames(self, video: Path, info: Optional[Dict] = None) -> int:
+        """Estimativa: quadros esperados (duracao x fps) - quadros presentes."""
+        info = info or info_midia(Path(video))
+        r = executar(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+                      "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(video)])
+        try:
+            presentes = int(r.stdout.strip().split(",")[0])
+        except ValueError:
+            return 0
+        # duracao do STREAM de video (a do container inclui a cauda do audio)
+        esperados = int(round(info["duracao_video"] * (info["fps"] or 0)))
+        faltando = esperados - presentes
+        # tolera 1 quadro de arredondamento e VFR leve (2%)
+        return faltando if faltando > max(1, esperados * 0.02) else 0
+
+    def _bitrates(self, video: Path, info: Dict) -> Tuple[float, float]:
+        r = executar(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                      "packet=pts_time,size", "-of", "csv=p=0", str(video)])
+        por_seg: Dict[int, int] = {}
+        for linha in r.stdout.splitlines():
+            try:
+                t, tam = linha.split(",")[:2]
+                por_seg[int(float(t))] = por_seg.get(int(float(t)), 0) + int(tam)
+            except ValueError:
+                continue
+        maximo = max(por_seg.values()) * 8.0 if por_seg else 0.0
+        return float(info.get("bit_rate", 0) or 0), maximo
 
     def _obter_resolucao(self, video: Path) -> str:
-        cmd = [
-            "ffprobe", "-v", "quiet",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0", str(video)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return result.stdout.strip().replace(",", "x")
+        i = info_midia(Path(video))
+        return f"{i['width']}x{i['height']}" if i["tem_video"] else ""
 
     def _obter_codec(self, video: Path) -> str:
-        cmd = [
-            "ffprobe", "-v", "quiet",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=codec_name",
-            "-of", "csv=p=0", str(video)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return result.stdout.strip()
+        return info_midia(Path(video))["codec"]
 
     def _calcular_checksum(self, video: Path) -> str:
-        hash_md5 = hashlib.md5()
-        with open(video, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
+        return md5_arquivo(Path(video))
 
-    def _verificar_aprovacao(self, report: QCReport) -> bool:
-        problemas = []
-        if not (-24 <= report.loudness_integrated <= -22):
-            problemas.append(f"Loudness fora do padrao: {report.loudness_integrated} LUFS")
-        if report.true_peak > -1.0:
-            problemas.append(f"True peak muito alto: {report.true_peak} dBTP")
+    def _verificar_aprovacao(self, report: QCReport, tp_max: Optional[float] = None) -> bool:
+        if tp_max is None:
+            tp_max = padrao_loudness(report.padrao)[1]
+        problemas, avisos = [], []
+        if not report.tem_audio:
+            problemas.append("Sem trilha de audio")
+        elif report.loudness_integrated is None:
+            problemas.append("Audio mudo (loudness nao mensuravel)")
+        else:
+            if abs(report.loudness_integrated - report.alvo_lufs) > self.TOLERANCIA_LU:
+                problemas.append(f"Loudness fora do padrao {report.padrao}: "
+                                 f"{report.loudness_integrated:.1f} LUFS (alvo {report.alvo_lufs:.0f} "
+                                 f"+/- {self.TOLERANCIA_LU:.0f})")
+            if report.true_peak is not None and report.true_peak > tp_max:
+                problemas.append(f"True peak muito alto: {report.true_peak:.1f} dBTP (max {tp_max:.0f})")
         if report.dropped_frames > 0:
-            problemas.append(f"Dropped frames: {report.dropped_frames}")
-        report.problemas = problemas
-        return len(problemas) == 0
+            problemas.append(f"Quadros faltando (estimado): {report.dropped_frames}")
+        if report.black_frames:
+            avisos.append(f"{report.black_frames} trecho(s) preto(s) >= 0,1 s")
+        if report.freeze_frames:
+            avisos.append(f"{report.freeze_frames} trecho(s) congelado(s) >= 0,5 s")
+        report.problemas, report.avisos = problemas, avisos
+        return not problemas
 
-    def gerar_relatorio_pdf(self, report: QCReport, saida: Path):
-        pass
+    def gerar_relatorio_pdf(self, report: QCReport, saida: Path) -> Path:
+        """PDF de 1+ paginas (sem dependencias). Antes: 'pass'."""
+        saida = Path(saida)
+        if saida.suffix.lower() != ".pdf":
+            saida.write_text(report.texto(), encoding="utf-8")
+            return saida
+        escrever_pdf_texto(report.texto().splitlines(), saida)
+        self.log(f"Relatorio de QC: {saida}")
+        return saida
+
+
+def escrever_pdf_texto(linhas: List[str], saida: Path, por_pagina: int = 60):
+    """Gera um PDF simples (Courier 10) com as linhas de texto."""
+    def esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    paginas = [linhas[i:i + por_pagina] for i in range(0, max(1, len(linhas)), por_pagina)] or [[]]
+    objs: List[bytes] = []
+    n_pag = len(paginas)
+    # 1 catalogo, 2 paginas, 3 fonte, depois (pagina, conteudo) por pagina
+    kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(n_pag))
+    objs.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objs.append(f"<< /Type /Pages /Kids [{kids}] /Count {n_pag} >>".encode())
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>")
+    for i, pag in enumerate(paginas):
+        corpo = "BT /F1 10 Tf 50 800 Td 12 TL " + " ".join(f"({esc(l)}) '" for l in pag) + " ET"
+        dados = corpo.encode("cp1252", "replace")
+        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                    f"/Resources << /Font << /F1 3 0 R >> >> /Contents {5 + 2 * i} 0 R >>".encode())
+        objs.append(b"<< /Length " + str(len(dados)).encode() + b" >>\nstream\n" + dados + b"\nendstream")
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for n, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{n} 0 obj\n".encode() + o + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+    out += b"".join(f"{o:010d} 00000 n \n".encode() for o in offsets)
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    Path(saida).write_bytes(bytes(out))
 
 
 # ============================================================
-# RENDERER PROFISSIONAL v7.0
+# RENDERER PROFISSIONAL
 # ============================================================
 
 class ProfessionalRenderer:
+    PRESETS = {
+        RenderPreset.DRAFT: ("ultrafast", "28"),
+        RenderPreset.FAST: ("fast", "23"),
+        RenderPreset.BALANCED: ("medium", "20"),
+        RenderPreset.HIGH_QUALITY: ("slow", "18"),
+        RenderPreset.MASTER: ("veryslow", "15"),
+    }
+    GRADE_PARA_LOOK = {ColorGrade.CINEMATIC: "cinematic", ColorGrade.VIBRANT: "vibrant",
+                       ColorGrade.WARM: "warm", ColorGrade.COLD: "cold",
+                       ColorGrade.FILM_NOIR: "film_noir", ColorGrade.ORANGE_TEAL: "orange_teal",
+                       ColorGrade.BLEACH_BYPASS: "bleach_bypass", ColorGrade.DAY_FOR_NIGHT: "day_for_night"}
+
     def __init__(self, log_callback: Callable):
         self.log = log_callback
         self.temp_dir = Path(tempfile.mkdtemp(prefix="vbp_pro_"))
@@ -663,118 +1103,187 @@ class ProfessionalRenderer:
         self.color = ColorGradingEngine(log_callback)
         self.editor = SeniorEditorEngine(log_callback)
         self.qc = QCEngine(log_callback)
+        self.transicoes = GLTransitionsEngine(log_callback)
+        self.ultimo_qc: Optional[QCReport] = None
 
     def renderizar(self, timeline: ProjectTimeline, saida: Path,
-                    preset: RenderPreset = RenderPreset.FAST) -> Path:
+                   preset: RenderPreset = RenderPreset.FAST) -> Path:
+        saida = Path(saida)
+        if not timeline.clips:
+            raise ValueError("Timeline vazia: importe midia primeiro.")
         self.log("=" * 60)
-        self.log("INICIANDO RENDERIZACAO PROFISSIONAL v7.0")
+        self.log(f"INICIANDO RENDERIZACAO v{VERSAO} ({preset.value}, "
+                 f"{timeline.resolucao[0]}x{timeline.resolucao[1]} @ {timeline.fps} fps)")
         self.log("=" * 60)
 
-        if preset in [RenderPreset.DRAFT, RenderPreset.FAST]:
-            self.log("Criando proxies para edicao fluida...")
-            self._criar_proxies(timeline)
-
-        self.log("Aplicando color grading...")
-        timeline = self._aplicar_color_grading(timeline)
-
-        self.log("Renderizando timeline...")
-        video_renderizado = self._renderizar_timeline(timeline, saida, preset)
+        intermediario = saida.with_name(f".{saida.stem}.render_tmp{saida.suffix or '.mp4'}")
+        try:
+            self._renderizar_timeline(timeline, intermediario, preset)
+            if timeline.normalizar_audio:
+                alvo, tp = padrao_loudness(timeline.padrao_audio)
+                self.log(f"Normalizando loudness para {timeline.padrao_audio} ({alvo} LUFS / {tp} dBTP)...")
+                normalizar_loudness(intermediario, saida, alvo, tp, self.log)
+            else:
+                os.replace(intermediario, saida)
+        finally:
+            if intermediario.exists():
+                intermediario.unlink()
 
         self.log("Executando QC automatico...")
-        report = self.qc.analisar_video(video_renderizado)
-
-        if not report.aprovado:
-            self.log("AVISO: QC detectou problemas:")
-            for problema in report.problemas:
-                self.log(f"  - {problema}")
-        else:
+        report = self.qc.analisar_video(saida, timeline.padrao_audio)
+        self.ultimo_qc = report
+        if report.aprovado:
             self.log("QC: Aprovado!")
-
-        checksum = self.automation.gerar_checksum(video_renderizado)
-        self.log(f"Checksum MD5: {checksum}")
+        else:
+            self.log("AVISO: QC detectou problemas:")
+            for p in report.problemas:
+                self.log(f"  - {p}")
+        for a in report.avisos:
+            self.log(f"  (aviso) {a}")
+        self.log(f"Checksum MD5: {report.checksum_md5}")
         self.log("=" * 60)
         self.log("RENDERIZACAO CONCLUIDA!")
         self.log("=" * 60)
-
-        return video_renderizado
-
-    def _criar_proxies(self, timeline: ProjectTimeline):
-        for clip in timeline.clips:
-            self.automation.criar_proxy(clip.arquivo)
-
-    def _aplicar_color_grading(self, timeline: ProjectTimeline) -> ProjectTimeline:
-        return timeline
-
-    def _renderizar_timeline(self, timeline: ProjectTimeline,
-                              saida: Path, preset: RenderPreset) -> Path:
-        configs = {
-            RenderPreset.DRAFT: ("ultrafast", "28"),
-            RenderPreset.FAST: ("fast", "23"),
-            RenderPreset.BALANCED: ("medium", "20"),
-            RenderPreset.HIGH_QUALITY: ("slow", "18"),
-            RenderPreset.MASTER: ("veryslow", "15"),
-        }
-        preset_ffmpeg, crf = configs.get(preset, configs[RenderPreset.FAST])
-
-        lista = self.temp_dir / "concat.txt"
-        with open(lista, 'w', encoding='utf-8') as f:
-            for clip in timeline.clips:
-                caminho = str(clip.arquivo).replace('\\', '/')
-                f.write(f"file '{caminho}'\n")
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", str(lista),
-            "-c:v", "libx264", "-preset", preset_ffmpeg, "-crf", crf,
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            str(saida)
-        ]
-
-        self.log(f"Executando render (preset: {preset.value})...")
-
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            universal_newlines=True
-        )
-        for line in process.stdout:
-            if "time=" in line:
-                self.log(line.strip())
-        process.wait()
-
-        if process.returncode != 0:
-            raise Exception(f"Render falhou com codigo: {process.returncode}")
-
         return saida
 
-    def exportar_edl(self, timeline: ProjectTimeline, saida: Path,
-                      formato: str = "premiere") -> Path:
+    # ------------------------------------------------------------ grafo
+    def _filtros_clipe(self, i: int, clip: ClipTimeline, info: Dict, tl: ProjectTimeline) -> List[str]:
+        w, h = tl.resolucao
+        w, h = int(w) - int(w) % 2, int(h) - int(h) % 2
+        dur_in = max(0.04, clip.fim - clip.inicio)
+        dur_out = clip.duracao_saida()
+        v = [f"setpts=PTS-STARTPTS"]
+        if clip.rampa:
+            v.append(self.editor.speed_ramp(clip, clip.rampa))
+        elif abs(clip.speed - 1.0) > 1e-6:
+            v.append(f"setpts=PTS/{clip.speed}")
+        v.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,"
+                 f"setsar=1,fps={tl.fps},format=yuv420p")
+        if tl.ajustes_cor:
+            v.append(filtro_ajustes(tl.ajustes_cor))
+        if clip.ajustes_cor:
+            v.append(filtro_ajustes(clip.ajustes_cor))
+        filtros = [f"[{i}:v]{','.join(x for x in v if x != 'null')}[vb{i}]"]
+        look = self.GRADE_PARA_LOOK.get(clip.color_grade) or tl.look
+        if look:
+            filtros.append(f"[vb{i}]{self.color.luts.obter_filtro_ffmpeg(look, tl.look_intensidade, rotulo=str(i))},"
+                           f"format=yuv420p,trim=duration={dur_out:.3f},settb=AVTB[vc{i}]")
+        else:
+            filtros.append(f"[vb{i}]trim=duration={dur_out:.3f},settb=AVTB[vc{i}]")
+        fmt_a = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+        if info["tem_audio"] and not clip.rampa:
+            a = ["asetpts=PTS-STARTPTS", fmt_a]
+            if abs(clip.speed - 1.0) > 1e-6:
+                a.append(cadeia_atempo(clip.speed))
+            a.append(f"apad,atrim=duration={dur_out:.3f},asettb=AVTB")
+            filtros.append(f"[{i}:a]{','.join(a)}[ac{i}]")
+        else:
+            if clip.rampa and info["tem_audio"]:
+                self.log(f"  {clip.nome}: speed ramp sem audio (atempo nao varia no tempo)")
+            filtros.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={dur_out:.3f},{fmt_a},asettb=AVTB[ac{i}]")
+        return filtros
+
+    def _renderizar_timeline(self, timeline: ProjectTimeline, saida: Path, preset: RenderPreset) -> Path:
+        preset_ffmpeg, crf = self.PRESETS.get(preset, self.PRESETS[RenderPreset.FAST])
+        entradas, filtros, infos = [], [], []
+        for i, clip in enumerate(timeline.clips):
+            info = info_midia(Path(clip.arquivo))
+            if not info["tem_video"]:
+                raise ValueError(f"'{Path(clip.arquivo).name}' nao tem video.")
+            clip.duracao_fonte = info["duracao"]
+            clip.fim = min(clip.fim, info["duracao"]) if clip.fim > 0 else info["duracao"]
+            clip.inicio = max(0.0, min(clip.inicio, clip.fim - 0.04))
+            entradas += ["-ss", f"{clip.inicio:.3f}", "-t", f"{clip.fim - clip.inicio:.3f}",
+                         "-i", str(clip.arquivo)]
+            filtros += self._filtros_clipe(i, clip, info, timeline)
+            infos.append(info)
+        n = len(timeline.clips)
+        duracoes = [c.duracao_saida() for c in timeline.clips]
+        rv, ra = [f"[vc{i}]" for i in range(n)], [f"[ac{i}]" for i in range(n)]
+
+        trans = timeline.transicao if timeline.transicao in self.transicoes.TRANSICOES_GL else ""
+        dt = float(timeline.duracao_transicao or 0.5)
+        if trans and n > 1 and min(duracoes) > dt + 0.05:
+            cadeia, fv, fa = self.transicoes.encadear(rv, ra, duracoes, [GLTransition(trans, dt)] * (n - 1))
+            filtros += cadeia
+            total = sum(duracoes) - dt * (n - 1)
+            self.log(f"Transicao '{trans}' ({dt:.2f}s) entre {n} clipes")
+        else:
+            if trans and n > 1:
+                self.log(f"AVISO: clipes curtos para transicao de {dt:.2f}s: usando corte seco")
+            filtros.append("".join(v + a for v, a in zip(rv, ra)) + f"concat=n={n}:v=1:a=1[vcat][acat]")
+            fv, fa, total = "[vcat]", "[acat]", sum(duracoes)
+
+        # EQ de 3 bandas (aba Audio)
+        eq = timeline.eq or {}
+        if any(abs(eq.get(k, 0)) > 0.01 for k in ("low", "mid", "high")):
+            filtros.append(f"{fa}bass=g={eq.get('low', 0)}:f=120,equalizer=f=1000:t=q:w=1:g={eq.get('mid', 0)},"
+                           f"treble=g={eq.get('high', 0)}:f=6000[aeq]")
+            fa = "[aeq]"
+
+        # Trilha sonora com ducking (sidechain pela voz)
+        if timeline.music and Path(timeline.music.arquivo).exists():
+            m = timeline.music
+            if m.loop:
+                entradas += ["-stream_loop", "-1"]
+            entradas += ["-i", str(m.arquivo)]
+            k = n
+            filtros.append(f"[{k}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                           f"volume={m.volume},apad,atrim=duration={total:.3f}[mus]")
+            if m.ducking:
+                filtros.append(f"{fa}asplit=2[voz][sc]")
+                filtros.append(f"[mus][sc]sidechaincompress=threshold={max(0.001, m.ducking_level):.3f}:"
+                               f"ratio=8:attack=20:release=400[duck]")
+                filtros.append("[voz][duck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amix]")
+            else:
+                filtros.append(f"{fa}[mus]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amix]")
+            fa = "[amix]"
+            self.log(f"Trilha: {Path(m.arquivo).name} (volume {m.volume}, ducking {m.ducking})")
+
+        script = self.temp_dir / "grafo_render.txt"
+        script.write_text(";\n".join(filtros), encoding="utf-8")
+        cmd = ["ffmpeg", "-y", *entradas, "-filter_complex_script", str(script),
+               "-map", fv, "-map", fa, "-c:v", "libx264", "-preset", preset_ffmpeg, "-crf", crf,
+               "-pix_fmt", "yuv420p", "-r", str(timeline.fps), "-c:a", "aac", "-b:a", "192k",
+               "-ar", "48000", "-movflags", "+faststart", str(saida)]
+        timeline.duracao_total = total
+        self.log(f"Executando render ({n} clipe(s), {total:.1f}s, preset {preset.value})...")
+        executar_com_progresso(cmd, self.log, total)
+        return saida
+
+    def exportar_edl(self, timeline: ProjectTimeline, saida: Path, formato: str = "premiere") -> Path:
         return self.automation.exportar_edl_xml(timeline, saida, formato)
 
+    def cleanup(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
     def __del__(self):
-        try:
-            shutil.rmtree(self.temp_dir)
-        except:
-            pass
+        self.cleanup()
 
 
 # ============================================================
-# INTERFACE v7.0 SUITE
+# INTERFACE v7.7 SUITE
 # ============================================================
 
 class VideoBuilderProV7:
+    TRANSICAO_NENHUMA = "(corte seco)"
+
     def __init__(self, root):
         self.root = root
-        self.root.title("Video Builder Pro v7.0 - Professional Suite")
+        self.root.title(f"Video Builder Pro v{VERSAO} - Professional Suite")
         self.root.geometry("1600x1000")
 
+        self.ui = UIDispatcher(root)
+        self.logger = obter_logger()
         self.config = ConfigManager()
-        self.videos = []
-        self.timeline = None
-        self.qc_report = None
+        self.clips: List[ClipTimeline] = []
+        self.timeline: Optional[ProjectTimeline] = None
+        self.qc_report: Optional[QCReport] = None
+        self.arquivo_projeto: Optional[Path] = None
+        self.trilha: Optional[MusicTrack] = None
         self.nb = None
         self.log_text = None
+        self._log_pendente: List[str] = []
 
         self.automation = VideoAutomationEngine(self.log)
         self.color = ColorGradingEngine(self.log)
@@ -785,12 +1294,23 @@ class VideoBuilderProV7:
 
         self.setup_ui()
 
+    # Compatibilidade: a v7.6 expunha self.videos (lista de Path)
+    @property
+    def videos(self) -> List[Path]:
+        return [Path(c.arquivo) for c in self.clips]
+
+    @videos.setter
+    def videos(self, valor: List[Path]):
+        self.clips = []
+        for v in valor:
+            self._adicionar_clip(Path(v), atualizar=False)
+        self._atualizar_listas()
+
+    # ------------------------------------------------------------ UI base
     def setup_ui(self):
         self.criar_menu()
-
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
         self.criar_aba_projeto(self.nb)
         self.criar_aba_midia(self.nb)
         self.criar_aba_timeline(self.nb)
@@ -807,8 +1327,9 @@ class VideoBuilderProV7:
         menu_arquivo = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Arquivo", menu=menu_arquivo)
         menu_arquivo.add_command(label="Novo Projeto", command=self.novo_projeto)
-        menu_arquivo.add_command(label="Abrir Projeto", command=self.abrir_projeto)
+        menu_arquivo.add_command(label="Abrir Projeto...", command=self.abrir_projeto)
         menu_arquivo.add_command(label="Salvar Projeto", command=self.salvar_projeto)
+        menu_arquivo.add_command(label="Salvar Projeto Como...", command=lambda: self.salvar_projeto(como=True))
         menu_arquivo.add_separator()
         menu_arquivo.add_command(label="Importar Midia", command=self.importar_midia)
         menu_arquivo.add_command(label="Exportar EDL/XML", command=self.exportar_edl)
@@ -817,8 +1338,8 @@ class VideoBuilderProV7:
 
         menu_editar = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Edicao", menu=menu_editar)
-        menu_editar.add_command(label="Ripple Edit", command=self.ripple_edit)
-        menu_editar.add_command(label="Multicam", command=self.multicam)
+        menu_editar.add_command(label="Ripple Delete (clipe selecionado)", command=self.ripple_edit)
+        menu_editar.add_command(label="Multicam (sincronizar por audio)", command=self.multicam)
         menu_editar.add_command(label="Speed Ramp", command=self.speed_ramp)
 
         menu_ferramentas = tk.Menu(menubar, tearoff=0)
@@ -827,117 +1348,159 @@ class VideoBuilderProV7:
         menu_ferramentas.add_command(label="Color Grading", command=self.abrir_color)
         menu_ferramentas.add_command(label="Audio Mix", command=self.abrir_audio)
         menu_ferramentas.add_command(label="QC Report", command=self.gerar_qc)
+        menu_ferramentas.add_command(label="Abrir pasta de logs", command=self.abrir_logs)
 
         menu_ajuda = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Ajuda", menu=menu_ajuda)
         menu_ajuda.add_command(label="Sobre", command=self.sobre)
 
+    # ------------------------------------------------------------ abas
     def criar_aba_projeto(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Projeto  ")
+        cf = ttk.LabelFrame(frame, text="Configuracoes do Projeto", padding=20)
+        cf.pack(fill=tk.X, padx=20, pady=20)
 
-        config_frame = ttk.LabelFrame(frame, text="Configuracoes do Projeto", padding=20)
-        config_frame.pack(fill=tk.X, padx=20, pady=20)
-
-        ttk.Label(config_frame, text="Nome:").grid(row=0, column=0, sticky=tk.W)
-        self.projeto_nome = ttk.Entry(config_frame, width=40)
+        ttk.Label(cf, text="Nome:").grid(row=0, column=0, sticky=tk.W)
+        self.projeto_nome = ttk.Entry(cf, width=40)
         self.projeto_nome.grid(row=0, column=1, padx=10, pady=5)
         self.projeto_nome.insert(0, "Novo Projeto Profissional")
 
-        ttk.Label(config_frame, text="Resolucao:").grid(row=1, column=0, sticky=tk.W)
+        ttk.Label(cf, text="Resolucao:").grid(row=1, column=0, sticky=tk.W)
         self.resolucao_var = tk.StringVar(value="1920x1080")
-        ttk.Combobox(config_frame, textvariable=self.resolucao_var,
-                     values=["1280x720", "1920x1080", "3840x2160"]).grid(row=1, column=1, sticky=tk.W, padx=10, pady=5)
+        ttk.Combobox(cf, textvariable=self.resolucao_var,
+                     values=["1280x720", "1920x1080", "3840x2160", "1080x1920", "1080x1080"]
+                     ).grid(row=1, column=1, sticky=tk.W, padx=10, pady=5)
 
-        ttk.Label(config_frame, text="FPS:").grid(row=2, column=0, sticky=tk.W)
+        ttk.Label(cf, text="FPS:").grid(row=2, column=0, sticky=tk.W)
         self.fps_var = tk.StringVar(value="25")
-        ttk.Combobox(config_frame, textvariable=self.fps_var,
-                     values=["24", "25", "30", "60"]).grid(row=2, column=1, sticky=tk.W, padx=10, pady=5)
+        ttk.Combobox(cf, textvariable=self.fps_var, values=["24", "25", "30", "50", "60"]
+                     ).grid(row=2, column=1, sticky=tk.W, padx=10, pady=5)
 
-        ttk.Label(config_frame, text="Padrao Audio:").grid(row=3, column=0, sticky=tk.W)
+        ttk.Label(cf, text="Padrao Audio:").grid(row=3, column=0, sticky=tk.W)
         self.audio_standard = tk.StringVar(value="EBU R128")
-        ttk.Combobox(config_frame, textvariable=self.audio_standard,
-                     values=["EBU R128", "ATSC A/85", "YouTube", "Netflix"]).grid(row=3, column=1, sticky=tk.W, padx=10, pady=5)
+        ttk.Combobox(cf, textvariable=self.audio_standard, values=list(PADROES_LOUDNESS),
+                     state="readonly").grid(row=3, column=1, sticky=tk.W, padx=10, pady=5)
+        ttk.Label(cf, text="(usado no render e no QC)").grid(row=3, column=2, sticky=tk.W)
 
     def criar_aba_midia(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Midia  ")
-
         toolbar = ttk.Frame(frame)
         toolbar.pack(fill=tk.X, padx=10, pady=10)
-
         ttk.Button(toolbar, text="Importar", command=self.importar_midia).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="Pasta", command=self.carregar_pasta).pack(side=tk.LEFT, padx=5)
-        ttk.Button(toolbar, text="Criar Proxies", command=self.criar_proxies).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Criar Proxies (preview)", command=self.criar_proxies).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="Limpar", command=self.limpar_midia).pack(side=tk.LEFT, padx=5)
-
         self.lista_midia = tk.Listbox(frame, height=10, font=("Helvetica", 10))
         self.lista_midia.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
     def criar_aba_timeline(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Timeline  ")
+        self.timeline_canvas = tk.Canvas(frame, bg="#1e1e1e", height=120)
+        self.timeline_canvas.pack(fill=tk.X, padx=10, pady=(10, 4))
 
-        self.timeline_canvas = tk.Canvas(frame, bg="#1e1e1e", height=300)
-        self.timeline_canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        colunas = ("n", "nome", "inicio", "fim", "duracao", "vel")
+        self.tree_clips = ttk.Treeview(frame, columns=colunas, show="headings", height=8, selectmode="browse")
+        for col, txt, larg in zip(colunas, ("#", "Clipe", "In (s)", "Out (s)", "Duracao final", "Velocidade"),
+                                  (40, 380, 90, 90, 110, 120)):
+            self.tree_clips.heading(col, text=txt)
+            self.tree_clips.column(col, width=larg)
+        self.tree_clips.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
 
         controls = ttk.Frame(frame)
-        controls.pack(fill=tk.X, padx=10, pady=10)
+        controls.pack(fill=tk.X, padx=10, pady=6)
+        for txt, cmd in (("Preview", self.preview), ("In/Out...", self.definir_in_out),
+                         ("Velocidade...", self.definir_velocidade), ("Speed Ramp...", self.speed_ramp),
+                         ("Subir", lambda: self.mover_clip(-1)), ("Descer", lambda: self.mover_clip(1)),
+                         ("Ripple Delete", self.ripple_edit), ("Multicam", self.multicam)):
+            ttk.Button(controls, text=txt, command=cmd).pack(side=tk.LEFT, padx=3)
 
-        ttk.Button(controls, text="Preview", command=self.preview).pack(side=tk.LEFT, padx=5)
-        ttk.Button(controls, text="Ripple Edit", command=self.ripple_edit).pack(side=tk.LEFT, padx=5)
-        ttk.Button(controls, text="Multicam", command=self.multicam).pack(side=tk.LEFT, padx=5)
-        ttk.Button(controls, text="Speed Ramp", command=self.speed_ramp).pack(side=tk.LEFT, padx=5)
+        tf = ttk.LabelFrame(frame, text="Transicao entre clipes", padding=8)
+        tf.pack(fill=tk.X, padx=10, pady=6)
+        nomes = [self.TRANSICAO_NENHUMA] + [t["nome"] for t in self.renderer.transicoes.listar_transicoes()]
+        self._transicao_por_nome = {t["nome"]: t["id"] for t in self.renderer.transicoes.listar_transicoes()}
+        self.transicao_var = tk.StringVar(value=self.TRANSICAO_NENHUMA)
+        ttk.Combobox(tf, textvariable=self.transicao_var, values=nomes, width=34, state="readonly").pack(side=tk.LEFT)
+        ttk.Label(tf, text="  Duracao (s):").pack(side=tk.LEFT)
+        self.transicao_dur_var = tk.DoubleVar(value=0.5)
+        ttk.Spinbox(tf, from_=0.1, to=3.0, increment=0.1, textvariable=self.transicao_dur_var, width=6).pack(side=tk.LEFT)
 
     def criar_aba_cor(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Cor  ")
+        ttk.Label(frame, text="Color Grading Profissional", font=("Helvetica", 16, "bold")).pack(pady=12)
 
-        ttk.Label(frame, text="Color Grading Profissional",
-                 font=("Helvetica", 16, "bold")).pack(pady=20)
+        lut_frame = ttk.LabelFrame(frame, text="Look / LUT do projeto (aplicado no render)", padding=12)
+        lut_frame.pack(fill=tk.X, padx=20, pady=6)
+        self.look_var = tk.StringVar(value="")
+        self.look_label = ttk.Label(lut_frame, text="Look atual: nenhum")
+        self.look_label.grid(row=0, column=0, columnspan=5, sticky=tk.W, pady=(0, 6))
+        nomes = ["Nenhum"] + [l.nome for l in self.color.luts.listar_luts()]
+        for k, nome in enumerate(nomes):
+            ttk.Button(lut_frame, text=nome, width=18,
+                       command=lambda n=nome: self.aplicar_lut(n)).grid(row=1 + k // 5, column=k % 5, padx=3, pady=3)
+        ttk.Button(lut_frame, text="Carregar .cube...", command=self.carregar_cube).grid(
+            row=2 + len(nomes) // 5, column=0, pady=6, sticky=tk.W)
+        ttk.Label(lut_frame, text="Intensidade:").grid(row=2 + len(nomes) // 5, column=1, sticky=tk.E)
+        self.look_intensidade = tk.DoubleVar(value=1.0)
+        ttk.Scale(lut_frame, from_=0.0, to=1.0, variable=self.look_intensidade,
+                  orient=tk.HORIZONTAL, length=200).grid(row=2 + len(nomes) // 5, column=2, columnspan=2)
 
-        lut_frame = ttk.LabelFrame(frame, text="LUTs Disponiveis", padding=15)
-        lut_frame.pack(fill=tk.X, padx=20, pady=10)
+        manual = ttk.LabelFrame(frame, text="Ajustes manuais (todos os clipes)", padding=12)
+        manual.pack(fill=tk.X, padx=20, pady=6)
+        self.cor_exposicao = tk.DoubleVar(value=0.0)
+        self.cor_contraste = tk.DoubleVar(value=1.0)
+        self.cor_saturacao = tk.DoubleVar(value=1.0)
+        for r, (txt, var, a, b) in enumerate((("Exposicao (brilho):", self.cor_exposicao, -0.3, 0.3),
+                                              ("Contraste:", self.cor_contraste, 0.5, 2.0),
+                                              ("Saturacao:", self.cor_saturacao, 0.0, 2.0))):
+            ttk.Label(manual, text=txt).grid(row=r, column=0, sticky=tk.W)
+            ttk.Scale(manual, from_=a, to=b, variable=var, orient=tk.HORIZONTAL, length=300).grid(row=r, column=1)
+        ttk.Button(manual, text="Zerar ajustes", command=self.zerar_ajustes_cor).grid(row=0, column=2, padx=10)
 
-        luts = ["Cinematic", "Orange Teal", "Film Noir", "Vintage"]
-        for lut in luts:
-            ttk.Button(lut_frame, text=lut,
-                      command=lambda l=lut: self.aplicar_lut(l)).pack(side=tk.LEFT, padx=5)
-
-        manual_frame = ttk.LabelFrame(frame, text="Ajustes Manuais", padding=15)
-        manual_frame.pack(fill=tk.X, padx=20, pady=10)
-
-        ttk.Label(manual_frame, text="Exposicao:").grid(row=0, column=0)
-        ttk.Scale(manual_frame, from_=-2, to=2, orient=tk.HORIZONTAL).grid(row=0, column=1)
-
-        ttk.Label(manual_frame, text="Contraste:").grid(row=1, column=0)
-        ttk.Scale(manual_frame, from_=0.5, to=2, orient=tk.HORIZONTAL).grid(row=1, column=1)
-
-        ttk.Label(manual_frame, text="Saturacao:").grid(row=2, column=0)
-        ttk.Scale(manual_frame, from_=0, to=2, orient=tk.HORIZONTAL).grid(row=2, column=1)
+        auto = ttk.LabelFrame(frame, text="Automaticos (por clipe)", padding=12)
+        auto.pack(fill=tk.X, padx=20, pady=6)
+        ttk.Button(auto, text="Corrigir exposicao (50 IRE)", command=self.auto_exposicao).pack(side=tk.LEFT, padx=4)
+        ttk.Button(auto, text="Match de cameras (ref = 1o clipe)", command=self.match_cameras).pack(side=tk.LEFT, padx=4)
+        ttk.Button(auto, text="Preview do look (1 quadro)", command=self.preview_look).pack(side=tk.LEFT, padx=4)
 
     def criar_aba_audio(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Audio  ")
+        ttk.Label(frame, text="Mixagem de Audio Profissional", font=("Helvetica", 16, "bold")).pack(pady=12)
 
-        ttk.Label(frame, text="Mixagem de Audio Profissional",
-                 font=("Helvetica", 16, "bold")).pack(pady=20)
+        pf = ttk.LabelFrame(frame, text="Padrao de Loudness (render + QC)", padding=12)
+        pf.pack(fill=tk.X, padx=20, pady=6)
+        for nome, (lufs, tp) in PADROES_LOUDNESS.items():
+            ttk.Button(pf, text=f"{nome} ({lufs:.0f} LUFS)",
+                       command=lambda n=nome: self.aplicar_padrao_audio(n)).pack(anchor=tk.W, pady=2)
 
-        padrao_frame = ttk.LabelFrame(frame, text="Padroes de Loudness", padding=15)
-        padrao_frame.pack(fill=tk.X, padx=20, pady=10)
+        cf = ttk.LabelFrame(frame, text="Controles", padding=12)
+        cf.pack(fill=tk.X, padx=20, pady=6)
+        self.audio_normalizar = tk.BooleanVar(value=True)
+        self.audio_ducking = tk.BooleanVar(value=True)
+        self.audio_eq = tk.BooleanVar(value=False)
+        ttk.Checkbutton(cf, text="Normalizacao (loudnorm 2 passadas)", variable=self.audio_normalizar).grid(row=0, column=0, sticky=tk.W)
+        ttk.Checkbutton(cf, text="Ducking automatico da trilha", variable=self.audio_ducking).grid(row=1, column=0, sticky=tk.W)
+        ttk.Checkbutton(cf, text="EQ de 3 bandas", variable=self.audio_eq).grid(row=2, column=0, sticky=tk.W)
+        self.eq_low, self.eq_mid, self.eq_high = tk.DoubleVar(value=0), tk.DoubleVar(value=0), tk.DoubleVar(value=0)
+        for c, (txt, var) in enumerate((("Graves", self.eq_low), ("Medios", self.eq_mid), ("Agudos", self.eq_high))):
+            ttk.Label(cf, text=f"{txt} (dB)").grid(row=3, column=c, padx=6)
+            ttk.Scale(cf, from_=-12, to=12, variable=var, orient=tk.HORIZONTAL, length=140).grid(row=4, column=c, padx=6)
 
-        padroes = ["EBU R128 (-23 LUFS)", "ATSC A/85 (-24 LUFS)",
-                   "YouTube (-14 LUFS)", "Netflix (-27 LUFS)"]
-        for padrao in padroes:
-            ttk.Button(padrao_frame, text=padrao,
-                      command=lambda p=padrao: self.aplicar_padrao_audio(p)).pack(anchor=tk.W, pady=2)
-
-        controls_frame = ttk.LabelFrame(frame, text="Controles", padding=15)
-        controls_frame.pack(fill=tk.X, padx=20, pady=10)
-
-        ttk.Checkbutton(controls_frame, text="Ducking Automatico").pack(anchor=tk.W)
-        ttk.Checkbutton(controls_frame, text="Normalizacao").pack(anchor=tk.W)
-        ttk.Checkbutton(controls_frame, text="EQ Parametrico").pack(anchor=tk.W)
+        tf = ttk.LabelFrame(frame, text="Trilha sonora", padding=12)
+        tf.pack(fill=tk.X, padx=20, pady=6)
+        self.trilha_label = ttk.Label(tf, text="Nenhuma trilha")
+        self.trilha_label.pack(anchor=tk.W)
+        ttk.Button(tf, text="Escolher trilha...", command=self.escolher_trilha).pack(side=tk.LEFT, padx=4)
+        ttk.Button(tf, text="Remover trilha", command=self.remover_trilha).pack(side=tk.LEFT, padx=4)
+        ttk.Label(tf, text="  Volume:").pack(side=tk.LEFT)
+        self.trilha_volume = tk.DoubleVar(value=0.3)
+        ttk.Scale(tf, from_=0.0, to=1.0, variable=self.trilha_volume, orient=tk.HORIZONTAL, length=150).pack(side=tk.LEFT)
+        self.trilha_loop = tk.BooleanVar(value=True)
+        ttk.Checkbutton(tf, text="Repetir", variable=self.trilha_loop).pack(side=tk.LEFT, padx=6)
 
     # ============================================================
     # ABA IA - ASSISTENTE CLAUDE
@@ -946,64 +1509,55 @@ class VideoBuilderProV7:
     def criar_aba_ia(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  IA  ")
+        ttk.Label(frame, text="Assistente IA (Claude)", font=("Helvetica", 16, "bold")).pack(pady=10)
 
-        ttk.Label(frame, text="Assistente IA (Claude)",
-                 font=("Helvetica", 16, "bold")).pack(pady=10)
-
-        # --- Chave da API ---
         key_frame = ttk.LabelFrame(frame, text="Chave da API (console.anthropic.com)", padding=10)
         key_frame.pack(fill=tk.X, padx=20, pady=5)
-
+        # v7.7: a chave salva NAO e mais carregada no campo (antes ficava na
+        # memoria do widget, copiavel). Deixe em branco para manter a atual.
         self.api_key_entry = ttk.Entry(key_frame, width=50, show="*")
         self.api_key_entry.pack(side=tk.LEFT, padx=5)
-        if self.claude.tem_chave():
-            self.api_key_entry.insert(0, self.config.get_api_key("claude"))
-
-        ttk.Button(key_frame, text="Salvar chave",
-                  command=self.salvar_chave_ia).pack(side=tk.LEFT, padx=5)
-
+        ttk.Button(key_frame, text="Salvar chave", command=self.salvar_chave_ia).pack(side=tk.LEFT, padx=5)
         ttk.Label(key_frame, text="Modelo:").pack(side=tk.LEFT, padx=(15, 5))
         self.modelo_var = tk.StringVar(value=self.claude.modelo())
-        ttk.Entry(key_frame, textvariable=self.modelo_var, width=22).pack(side=tk.LEFT)
+        ttk.Entry(key_frame, textvariable=self.modelo_var, width=26).pack(side=tk.LEFT)
+        self.chave_status = ttk.Label(frame, text=self._texto_status_chave())
+        self.chave_status.pack(anchor=tk.W, padx=24)
 
-        # --- Tema ---
         tema_frame = ttk.LabelFrame(frame, text="Tema / Texto", padding=10)
         tema_frame.pack(fill=tk.X, padx=20, pady=5)
-
         self.ia_prompt = scrolledtext.ScrolledText(tema_frame, height=4)
         self.ia_prompt.pack(fill=tk.X)
 
-        # --- Botoes ---
         btns = ttk.Frame(frame)
         btns.pack(pady=8)
+        for txt, tipo in (("Roteiro", "roteiro"), ("Titulos", "titulos"), ("Descricao YouTube", "descricao"),
+                          ("Capitulos", "capitulos"), ("Hashtags", "hashtags"), ("Melhorar texto", "melhorar")):
+            ttk.Button(btns, text=txt, command=lambda t=tipo: self.gerar_ia(t)).pack(side=tk.LEFT, padx=4)
 
-        ttk.Button(btns, text="Roteiro",
-                  command=lambda: self.gerar_ia("roteiro")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Titulos",
-                  command=lambda: self.gerar_ia("titulos")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Descricao YouTube",
-                  command=lambda: self.gerar_ia("descricao")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Capitulos",
-                  command=lambda: self.gerar_ia("capitulos")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Hashtags",
-                  command=lambda: self.gerar_ia("hashtags")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Melhorar texto",
-                  command=lambda: self.gerar_ia("melhorar")).pack(side=tk.LEFT, padx=4)
-
-        # --- Resultado ---
         self.ia_result = scrolledtext.ScrolledText(frame, height=14, font=("Consolas", 10))
         self.ia_result.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-
         ttk.Button(frame, text="Copiar resultado", command=self.copiar_ia).pack(pady=5)
+
+    def _texto_status_chave(self) -> str:
+        onde = self.config.onde_esta_chave("claude")
+        return f"Chave salva em: {onde}" if onde else "Nenhuma chave salva."
 
     def salvar_chave_ia(self):
         chave = self.api_key_entry.get().strip()
+        modelo = self.modelo_var.get().strip()
+        if modelo:
+            self.config.set("claude_model", modelo)
         if not chave:
-            messagebox.showwarning("Aviso", "Cole a chave da API primeiro.")
+            if self.claude.tem_chave():
+                messagebox.showinfo("IA", "Modelo salvo. Chave atual mantida.")
+            else:
+                messagebox.showwarning("Aviso", "Cole a chave da API primeiro.")
             return
         self.claude.salvar_chave(chave)
-        self.config.set("claude_model", self.modelo_var.get().strip())
-        messagebox.showinfo("IA", "Chave salva com sucesso!")
+        self.api_key_entry.delete(0, tk.END)
+        self.chave_status.config(text=self._texto_status_chave())
+        messagebox.showinfo("IA", f"Chave salva com sucesso ({self.config.onde_esta_chave('claude')}).")
 
     def gerar_ia(self, tipo: str):
         tema = self.ia_prompt.get("1.0", tk.END).strip()
@@ -1013,34 +1567,24 @@ class VideoBuilderProV7:
         if not self.claude.tem_chave():
             messagebox.showwarning("Aviso", "Salve a chave da API primeiro.")
             return
-
-        self.config.set("claude_model", self.modelo_var.get().strip())
+        if self.modelo_var.get().strip():
+            self.config.set("claude_model", self.modelo_var.get().strip())
         self.ia_result.delete(1.0, tk.END)
         self.ia_result.insert(tk.END, "Gerando com Claude... aguarde.\n")
+        funcoes = {"roteiro": self.claude.roteiro, "titulos": self.claude.titulos,
+                   "descricao": self.claude.descricao_youtube, "capitulos": self.claude.capitulos,
+                   "hashtags": self.claude.hashtags, "melhorar": self.claude.melhorar_texto}
+
+        def mostrar(texto):
+            self.ia_result.delete(1.0, tk.END)
+            self.ia_result.insert(tk.END, texto)
 
         def tarefa():
-            try:
-                if tipo == "roteiro":
-                    texto = self.claude.roteiro(tema)
-                elif tipo == "titulos":
-                    texto = self.claude.titulos(tema)
-                elif tipo == "descricao":
-                    texto = self.claude.descricao_youtube(tema)
-                elif tipo == "capitulos":
-                    texto = self.claude.capitulos(tema)
-                elif tipo == "hashtags":
-                    texto = self.claude.hashtags(tema)
-                else:
-                    texto = self.claude.melhorar_texto(tema)
+            texto = funcoes.get(tipo, self.claude.melhorar_texto)(tema)
+            self.ui.chamar(mostrar, texto)
+            self.log("IA: conteudo gerado com sucesso.")
 
-                self.ia_result.delete(1.0, tk.END)
-                self.ia_result.insert(tk.END, texto)
-                self.log("IA: conteudo gerado com sucesso.")
-            except Exception as e:
-                self.ia_result.delete(1.0, tk.END)
-                self.ia_result.insert(tk.END, f"Erro:\n{e}")
-
-        threading.Thread(target=tarefa, daemon=True).start()
+        self.ui.em_segundo_plano(tarefa, ao_erro=lambda e: mostrar(f"Erro:\n{e}"), nome="ia")
 
     def copiar_ia(self):
         texto = self.ia_result.get(1.0, tk.END).strip()
@@ -1052,236 +1596,555 @@ class VideoBuilderProV7:
     def criar_aba_render(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  Render  ")
-
-        ttk.Label(frame, text="Renderizacao Profissional",
-                 font=("Helvetica", 16, "bold")).pack(pady=20)
-
-        preset_frame = ttk.LabelFrame(frame, text="Preset de Render", padding=15)
-        preset_frame.pack(fill=tk.X, padx=20, pady=10)
-
+        ttk.Label(frame, text="Renderizacao Profissional", font=("Helvetica", 16, "bold")).pack(pady=12)
+        pf = ttk.LabelFrame(frame, text="Preset de Render", padding=12)
+        pf.pack(fill=tk.X, padx=20, pady=6)
         self.preset_var = tk.StringVar(value="FAST")
-        presets = [("DRAFT (Rascunho)", "DRAFT"),
-                   ("FAST (Rapido)", "FAST"),
-                   ("BALANCED (Equilibrado)", "BALANCED"),
-                   ("HIGH_QUALITY (Alta Qualidade)", "HIGH_QUALITY"),
-                   ("MASTER (Master/4K)", "MASTER")]
-
-        for texto, valor in presets:
-            ttk.Radiobutton(preset_frame, text=texto,
-                           variable=self.preset_var, value=valor).pack(anchor=tk.W)
-
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(pady=30)
-
-        ttk.Button(btn_frame, text="RENDERIZAR",
-                  command=self.renderizar).pack(side=tk.LEFT, padx=10)
-        ttk.Button(btn_frame, text="Exportar EDL",
-                  command=self.exportar_edl).pack(side=tk.LEFT, padx=10)
-        ttk.Button(btn_frame, text="Adicionar a Fila",
-                  command=self.adicionar_fila).pack(side=tk.LEFT, padx=10)
-
+        for texto, valor in (("DRAFT (Rascunho)", "DRAFT"), ("FAST (Rapido)", "FAST"),
+                             ("BALANCED (Equilibrado)", "BALANCED"), ("HIGH_QUALITY (Alta Qualidade)", "HIGH_QUALITY"),
+                             ("MASTER (CRF 15, veryslow)", "MASTER")):
+            ttk.Radiobutton(pf, text=texto, variable=self.preset_var, value=valor).pack(anchor=tk.W)
+        bf = ttk.Frame(frame)
+        bf.pack(pady=16)
+        ttk.Button(bf, text="RENDERIZAR", command=self.renderizar).pack(side=tk.LEFT, padx=8)
+        ttk.Button(bf, text="Exportar EDL", command=self.exportar_edl).pack(side=tk.LEFT, padx=8)
+        ttk.Button(bf, text="Adicionar a Fila", command=self.adicionar_fila).pack(side=tk.LEFT, padx=8)
+        ttk.Button(bf, text="Processar Fila", command=self.processar_fila).pack(side=tk.LEFT, padx=8)
+        self.fila_label = ttk.Label(frame, text="Fila vazia")
+        self.fila_label.pack()
         self.log_text = scrolledtext.ScrolledText(frame, height=12)
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=12)
+        for msg in self._log_pendente:   # mensagens anteriores a criacao da aba
+            self.log_text.insert(tk.END, msg + "\n")
+        self._log_pendente.clear()
 
     def criar_aba_qc(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  QC  ")
-
-        ttk.Label(frame, text="Controle de Qualidade Automatico",
-                 font=("Helvetica", 16, "bold")).pack(pady=20)
-
-        ttk.Button(frame, text="Analisar Video Renderizado",
-                  command=self.analisar_qc).pack(pady=20)
-
-        self.qc_result = scrolledtext.ScrolledText(frame, height=20,
-                                                    font=("Consolas", 10))
-        self.qc_result.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        ttk.Label(frame, text="Controle de Qualidade Automatico", font=("Helvetica", 16, "bold")).pack(pady=12)
+        bf = ttk.Frame(frame)
+        bf.pack(pady=10)
+        ttk.Button(bf, text="Analisar Video...", command=self.analisar_qc).pack(side=tk.LEFT, padx=6)
+        ttk.Button(bf, text="Exportar Relatorio (PDF/TXT)...", command=self.exportar_relatorio_qc).pack(side=tk.LEFT, padx=6)
+        ttk.Label(frame, text="O alvo de loudness segue o 'Padrao Audio' da aba Projeto.").pack()
+        self.qc_result = scrolledtext.ScrolledText(frame, height=20, font=("Consolas", 10))
+        self.qc_result.pack(fill=tk.BOTH, expand=True, padx=20, pady=12)
 
     # ============================================================
-    # METODOS DE ACAO
+    # LOG E UTILITARIOS DE UI
     # ============================================================
 
     def log(self, msg):
+        """Thread-safe: de qualquer thread, a escrita no widget acontece na UI."""
+        msg = str(msg)
+        self.logger.info(msg)
+        self.ui.chamar(self._log_na_ui, msg)
+
+    def _log_na_ui(self, msg: str):
+        if self.log_text is None:
+            self._log_pendente.append(msg)
+            return
+        self.log_text.insert(tk.END, f"{msg}\n")
+        self.log_text.see(tk.END)
+
+    def _info(self, titulo, texto):
+        self.ui.chamar(messagebox.showinfo, titulo, texto)
+
+    def _erro(self, titulo, texto):
+        self.ui.chamar(messagebox.showerror, titulo, texto)
+
+    def _clip_selecionado(self) -> Optional[int]:
+        sel = self.tree_clips.selection()
+        if not sel:
+            if len(self.clips) == 1:
+                return 0
+            messagebox.showwarning("Timeline", "Selecione um clipe na lista da Timeline.")
+            return None
+        return int(sel[0])
+
+    # ============================================================
+    # MIDIA / TIMELINE
+    # ============================================================
+
+    def _adicionar_clip(self, arquivo: Path, atualizar: bool = True) -> bool:
         try:
-            if self.log_text is not None:
-                self.log_text.insert(tk.END, f"{msg}\n")
-                self.log_text.see(tk.END)
-                self.root.update_idletasks()
-            else:
-                print(msg)
-        except Exception:
-            print(msg)
+            info = info_midia(arquivo)
+        except FFmpegErro as e:
+            self.log(f"[ERRO] {arquivo.name}: {e}")
+            return False
+        if not info["tem_video"]:
+            self.log(f"[AVISO] {arquivo.name} ignorado: sem video.")
+            return False
+        self.clips.append(ClipTimeline(arquivo=arquivo, inicio=0.0, fim=info["duracao"],
+                                       duracao=info["duracao"], nome=arquivo.name,
+                                       duracao_fonte=info["duracao"]))
+        if atualizar:
+            self._atualizar_listas()
+        return True
+
+    def _atualizar_listas(self):
+        self.lista_midia.delete(0, tk.END)
+        for c in self.clips:
+            self.lista_midia.insert(tk.END, f"{c.nome}  ({c.duracao_fonte:.1f}s)")
+        for iid in self.tree_clips.get_children():
+            self.tree_clips.delete(iid)
+        for i, c in enumerate(self.clips):
+            vel = "rampa" if c.rampa else f"{c.speed:.2f}x"
+            self.tree_clips.insert("", "end", iid=str(i), values=(
+                i + 1, c.nome, f"{c.inicio:.2f}", f"{c.fim:.2f}", f"{c.duracao_saida():.2f}s", vel))
+        self._desenhar_timeline()
+
+    def _desenhar_timeline(self):
+        cv = self.timeline_canvas
+        cv.delete("all")
+        total = sum(c.duracao_saida() for c in self.clips) or 1.0
+        largura = max(200, cv.winfo_width() - 20)
+        x = 10
+        cores = ("#3a7bd5", "#00a86b", "#d2691e", "#8e44ad", "#c0392b", "#16a085")
+        for i, c in enumerate(self.clips):
+            w = max(4, c.duracao_saida() / total * largura)
+            cv.create_rectangle(x, 30, x + w, 90, fill=cores[i % len(cores)], outline="#ffffff")
+            if w > 50:
+                cv.create_text(x + 5, 60, text=f"{i + 1}. {c.nome[:20]}", anchor=tk.W, fill="white")
+            x += w
+        cv.create_text(10, 12, text=f"Duracao total: {total:.2f}s", anchor=tk.W, fill="#cccccc")
 
     def importar_midia(self):
-        files = filedialog.askopenfilenames(
-            filetypes=[("Videos", "*.mp4 *.mov *.avi *.mkv *.mts *.m4v")]
-        )
+        files = filedialog.askopenfilenames(filetypes=[("Videos", " ".join("*" + e for e in EXTS_VIDEO))])
         for f in files:
-            self.videos.append(Path(f))
-            self.lista_midia.insert(tk.END, Path(f).name)
+            self._adicionar_clip(Path(f), atualizar=False)
+        self._atualizar_listas()
 
     def carregar_pasta(self):
         pasta = filedialog.askdirectory()
         if pasta:
-            for f in Path(pasta).iterdir():
-                if f.suffix.lower() in ['.mp4', '.mov', '.avi', '.mkv']:
-                    self.videos.append(f)
-                    self.lista_midia.insert(tk.END, f.name)
+            for f in sorted(Path(pasta).iterdir()):
+                if f.suffix.lower() in EXTS_VIDEO:
+                    self._adicionar_clip(f, atualizar=False)
+            self._atualizar_listas()
 
     def criar_proxies(self):
-        if not self.videos:
+        if not self.clips:
             messagebox.showwarning("Aviso", "Importe videos primeiro!")
+            return
+        arquivos = self.videos
+
+        def tarefa():
+            self.log("Criando proxies (usados no Preview; o render usa os originais)...")
+            for video in arquivos:
+                proxy = self.automation.criar_proxy(video)
+                self.log(f"Proxy criado: {proxy.name}")
+        self.ui.em_segundo_plano(tarefa, ao_erro=lambda e: messagebox.showerror("Proxies", str(e)), nome="proxies")
+
+    def limpar_midia(self):
+        self.clips = []
+        self._atualizar_listas()
+
+    def preview(self):
+        i = self._clip_selecionado()
+        if i is None:
+            return
+        c = self.clips[i]
+        alvo = self.automation.proxies.get(str(c.arquivo), c.arquivo)
+        try:
+            player = abrir_no_player(alvo, c.inicio)
+            self.log(f"Preview: {c.nome} a partir de {c.inicio:.2f}s ({player})")
+        except OSError as e:
+            messagebox.showerror("Preview", f"Nao foi possivel abrir o player: {e}")
+
+    def definir_in_out(self):
+        i = self._clip_selecionado()
+        if i is None:
+            return
+        c = self.clips[i]
+        ini = simpledialog.askfloat("In", f"Inicio (s) - 0 a {c.duracao_fonte:.2f}:", initialvalue=c.inicio,
+                                    minvalue=0.0, maxvalue=c.duracao_fonte, parent=self.root)
+        if ini is None:
+            return
+        fim = simpledialog.askfloat("Out", f"Fim (s) - {ini:.2f} a {c.duracao_fonte:.2f}:", initialvalue=c.fim,
+                                    minvalue=ini + 0.04, maxvalue=c.duracao_fonte, parent=self.root)
+        if fim is None:
+            return
+        c.inicio, c.fim = float(ini), float(fim)
+        self.editor._sync_dur(c)
+        self._atualizar_listas()
+
+    def definir_velocidade(self):
+        i = self._clip_selecionado()
+        if i is None:
+            return
+        v = simpledialog.askfloat("Velocidade", "Velocidade (0.25 = 4x lento, 2.0 = 2x rapido):",
+                                  initialvalue=self.clips[i].speed, minvalue=0.1, maxvalue=8.0, parent=self.root)
+        if v:
+            self.clips[i].speed, self.clips[i].rampa = float(v), []
+            self._atualizar_listas()
+
+    def speed_ramp(self):
+        """Velocidade por trechos. Ex.: '0:1, 2:0.5, 4:2' (tempo relativo ao In)."""
+        i = self._clip_selecionado()
+        if i is None:
+            return
+        atual = ", ".join(f"{t:g}:{v:g}" for t, v in self.clips[i].rampa) or "0:1, 2:0.5, 4:1"
+        txt = simpledialog.askstring("Speed Ramp", "Pontos tempo:velocidade (s relativos ao In)\n"
+                                     "Ex.: 0:1, 2:0.5, 4:2   (vazio = remover rampa)",
+                                     initialvalue=atual, parent=self.root)
+        if txt is None:
+            return
+        try:
+            pontos = [] if not txt.strip() else [
+                (float(t), float(v)) for t, v in (p.split(":") for p in txt.replace(";", ",").split(","))]
+            if pontos:
+                SeniorEditorEngine._normalizar_rampa(pontos)
+        except ValueError as e:
+            messagebox.showerror("Speed Ramp", f"Formato invalido: {e}")
+            return
+        self.clips[i].rampa, self.clips[i].speed = pontos, 1.0
+        self._atualizar_listas()
+        self.log(f"Speed ramp em '{self.clips[i].nome}': {pontos or 'removida'}")
+
+    def mover_clip(self, delta: int):
+        i = self._clip_selecionado()
+        if i is None:
+            return
+        j = i + delta
+        if 0 <= j < len(self.clips):
+            self.clips[i], self.clips[j] = self.clips[j], self.clips[i]
+            self._atualizar_listas()
+            self.tree_clips.selection_set(str(j))
+
+    def ripple_edit(self):
+        i = self._clip_selecionado()
+        if i is None:
+            return
+        tl = self._montar_timeline()
+        nome = self.clips[i].nome
+        self.editor.ripple_delete(tl, i)
+        self.clips = tl.clips
+        self._atualizar_listas()
+        self.log(f"Ripple delete: '{nome}' removido; clipes seguintes avancaram.")
+
+    def multicam(self):
+        if len(self.clips) < 2:
+            messagebox.showwarning("Multicam", "Importe 2 ou mais angulos (o 1o e a referencia).")
+            return
+        arquivos = self.videos
+
+        def tarefa():
+            novos = self.editor.criar_multicam(arquivos)
+
+            def aplicar():
+                for c, n in zip(self.clips, novos):
+                    c.inicio, c.fim = n.inicio, n.fim
+                    self.editor._sync_dur(c)
+                self._atualizar_listas()
+                messagebox.showinfo("Multicam", "Angulos sincronizados pelo audio (In/Out ajustados).")
+            self.ui.chamar(aplicar)
+        self.log("Multicam: sincronizando angulos pelo audio...")
+        self.ui.em_segundo_plano(tarefa, ao_erro=lambda e: messagebox.showerror("Multicam", str(e)), nome="multicam")
+
+    # ============================================================
+    # COR / AUDIO
+    # ============================================================
+
+    def aplicar_lut(self, lut):
+        """Define o look do projeto (antes so registrava no log)."""
+        self.look_var.set("" if lut == "Nenhum" else lut)
+        self.look_label.config(text=f"Look atual: {lut if lut != 'Nenhum' else 'nenhum'}")
+        self.log(f"Look do projeto: {lut}")
+
+    def carregar_cube(self):
+        arq = filedialog.askopenfilename(filetypes=[("LUT 3D", "*.cube")])
+        if arq:
+            p = Path(arq)
+            self.color.luts.adicionar_lut_personalizada(p.stem, p)
+            self.aplicar_lut(p.stem)
+
+    def zerar_ajustes_cor(self):
+        self.cor_exposicao.set(0.0)
+        self.cor_contraste.set(1.0)
+        self.cor_saturacao.set(1.0)
+        for c in self.clips:
+            c.ajustes_cor = {}
+        self.log("Ajustes de cor zerados.")
+
+    def auto_exposicao(self):
+        if not self.clips:
+            messagebox.showwarning("Cor", "Importe videos primeiro!")
+            return
+        clips = list(self.clips)
+
+        def tarefa():
+            for c in clips:
+                c.ajustes_cor = {**c.ajustes_cor, **self.color.calcular_exposicao(c.arquivo)}
+            self._info("Cor", "Exposicao calculada por clipe (aplicada no render).")
+        self.ui.em_segundo_plano(tarefa, ao_erro=lambda e: messagebox.showerror("Cor", str(e)), nome="exposicao")
+
+    def match_cameras(self):
+        if len(self.clips) < 2:
+            messagebox.showwarning("Cor", "Precisa de 2 ou mais clipes (o 1o e a referencia).")
+            return
+        ref, alvos = self.clips[0], self.clips[1:]
+
+        def tarefa():
+            for c in alvos:
+                c.ajustes_cor = {**c.ajustes_cor, **self.color.calcular_match(ref.arquivo, c.arquivo)}
+                self.log(f"Match {c.nome}: {c.ajustes_cor}")
+            self._info("Cor", "Match de cameras calculado (aplicado no render).")
+        self.ui.em_segundo_plano(tarefa, ao_erro=lambda e: messagebox.showerror("Cor", str(e)), nome="match")
+
+    def preview_look(self):
+        if not self.clips:
+            messagebox.showwarning("Cor", "Importe videos primeiro!")
+            return
+        c = self.clips[0]
+        tl = self._montar_timeline()
+        destino = self.renderer.temp_dir / "preview_look.png"
+        filtro = filtro_ajustes(tl.ajustes_cor)
+        look = self.color.luts.obter_filtro_ffmpeg(tl.look, tl.look_intensidade) if tl.look else "null"
+
+        def tarefa():
+            executar(["ffmpeg", "-y", "-ss", f"{c.inicio + (c.fim - c.inicio) / 2:.2f}", "-i", str(c.arquivo),
+                      "-filter_complex", f"[0:v]{filtro}[a];[a]{look}[b]", "-map", "[b]", "-frames:v", "1",
+                      str(destino)], self.log)
+            self.ui.chamar(abrir_no_player, destino)
+        self.ui.em_segundo_plano(tarefa, ao_erro=lambda e: messagebox.showerror("Cor", str(e)), nome="preview_look")
+
+    def aplicar_padrao_audio(self, padrao):
+        """Define o padrao de loudness (antes so registrava no log)."""
+        self.audio_standard.set(padrao)
+        alvo, tp = padrao_loudness(padrao)
+        self.log(f"Padrao de audio: {padrao} ({alvo} LUFS, true peak {tp} dBTP)")
+
+    def escolher_trilha(self):
+        arq = filedialog.askopenfilename(filetypes=[("Audio", "*.mp3 *.wav *.m4a *.flac *.aac *.ogg")])
+        if arq:
+            self.trilha = MusicTrack(Path(arq))
+            self.trilha_label.config(text=f"Trilha: {Path(arq).name}")
+
+    def remover_trilha(self):
+        self.trilha = None
+        self.trilha_label.config(text="Nenhuma trilha")
+
+    # ============================================================
+    # PROJETO
+    # ============================================================
+
+    def _montar_timeline(self) -> ProjectTimeline:
+        try:
+            w, h = (int(x) for x in self.resolucao_var.get().lower().split("x"))
+        except ValueError:
+            raise ValueError("Resolucao invalida (use LARGURAxALTURA, ex.: 1920x1080)")
+        try:
+            fps = int(float(self.fps_var.get()))
+        except ValueError:
+            raise ValueError("FPS invalido")
+        aj = {"brightness": round(self.cor_exposicao.get(), 4), "contrast": round(self.cor_contraste.get(), 4),
+              "saturation": round(self.cor_saturacao.get(), 4)}
+        musica = None
+        if self.trilha:
+            musica = MusicTrack(self.trilha.arquivo, volume=round(self.trilha_volume.get(), 3),
+                                ducking=self.audio_ducking.get(), loop=self.trilha_loop.get())
+        eq = {"low": self.eq_low.get(), "mid": self.eq_mid.get(), "high": self.eq_high.get()} \
+            if self.audio_eq.get() else {}
+        return ProjectTimeline(
+            clips=self.clips, projeto_nome=self.projeto_nome.get(), fps=fps, resolucao=(w, h),
+            look=self.look_var.get(), look_intensidade=round(self.look_intensidade.get(), 3),
+            ajustes_cor=aj, padrao_audio=self.audio_standard.get(),
+            normalizar_audio=self.audio_normalizar.get(), eq=eq, music=musica,
+            transicao=self._transicao_por_nome.get(self.transicao_var.get(), ""),
+            duracao_transicao=float(self.transicao_dur_var.get() or 0.5))
+
+    def _aplicar_timeline_na_ui(self, tl: ProjectTimeline):
+        self.projeto_nome.delete(0, tk.END)
+        self.projeto_nome.insert(0, tl.projeto_nome)
+        self.resolucao_var.set(f"{tl.resolucao[0]}x{tl.resolucao[1]}")
+        self.fps_var.set(str(tl.fps))
+        self.audio_standard.set(tl.padrao_audio)
+        self.look_var.set(tl.look)
+        self.look_label.config(text=f"Look atual: {tl.look or 'nenhum'}")
+        self.look_intensidade.set(tl.look_intensidade)
+        self.cor_exposicao.set(tl.ajustes_cor.get("brightness", 0.0))
+        self.cor_contraste.set(tl.ajustes_cor.get("contrast", 1.0))
+        self.cor_saturacao.set(tl.ajustes_cor.get("saturation", 1.0))
+        self.audio_normalizar.set(tl.normalizar_audio)
+        self.audio_eq.set(bool(tl.eq))
+        self.eq_low.set(tl.eq.get("low", 0))
+        self.eq_mid.set(tl.eq.get("mid", 0))
+        self.eq_high.set(tl.eq.get("high", 0))
+        if tl.music:
+            self.trilha = tl.music
+            self.trilha_volume.set(tl.music.volume)
+            self.trilha_loop.set(tl.music.loop)
+            self.audio_ducking.set(tl.music.ducking)
+            self.trilha_label.config(text=f"Trilha: {Path(tl.music.arquivo).name}")
+        else:
+            self.remover_trilha()
+        nomes = {v: k for k, v in self._transicao_por_nome.items()}
+        self.transicao_var.set(nomes.get(tl.transicao, self.TRANSICAO_NENHUMA))
+        self.transicao_dur_var.set(tl.duracao_transicao)
+        self.clips = tl.clips
+        self._atualizar_listas()
+
+    def novo_projeto(self):
+        self.timeline = None
+        self.arquivo_projeto = None
+        self.limpar_midia()
+        self.root.title(f"Video Builder Pro v{VERSAO} - Professional Suite")
+
+    def abrir_projeto(self, caminho: Optional[Path] = None):
+        caminho = caminho or filedialog.askopenfilename(filetypes=[("Projeto Video Builder", "*.vbp.json *.json")])
+        if not caminho:
+            return
+        try:
+            tl = timeline_de_dict(json.loads(Path(caminho).read_text(encoding="utf-8")))
+        except (OSError, ValueError, KeyError) as e:
+            messagebox.showerror("Abrir Projeto", f"Arquivo invalido:\n{e}")
+            return
+        faltando = [c.nome or str(c.arquivo) for c in tl.clips if not Path(c.arquivo).exists()]
+        self._aplicar_timeline_na_ui(tl)
+        self.arquivo_projeto = Path(caminho)
+        self.root.title(f"Video Builder Pro v{VERSAO} - {Path(caminho).name}")
+        self.log(f"Projeto aberto: {caminho}")
+        if faltando:
+            messagebox.showwarning("Abrir Projeto", "Midias nao encontradas:\n" + "\n".join(faltando))
+
+    def salvar_projeto(self, como: bool = False, caminho: Optional[Path] = None):
+        caminho = caminho or (None if como else self.arquivo_projeto) or filedialog.asksaveasfilename(
+            defaultextension=".vbp.json", filetypes=[("Projeto Video Builder", "*.vbp.json")])
+        if not caminho:
+            return
+        try:
+            dados = timeline_para_dict(self._montar_timeline())
+            Path(caminho).write_text(json.dumps(dados, indent=2, ensure_ascii=False), encoding="utf-8")
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Salvar Projeto", str(e))
+            return
+        self.arquivo_projeto = Path(caminho)
+        self.root.title(f"Video Builder Pro v{VERSAO} - {Path(caminho).name}")
+        self.log(f"Projeto salvo: {caminho}")
+
+    # ============================================================
+    # RENDER / FILA / EDL
+    # ============================================================
+
+    def exportar_edl(self):
+        if not self.clips:
+            messagebox.showwarning("Aviso", "Importe midia primeiro!")
+            return
+        arquivo = filedialog.asksaveasfilename(defaultextension=".xml",
+                                               filetypes=[("FCP7 XML (Premiere / DaVinci)", "*.xml")])
+        if arquivo:
+            try:
+                self.renderer.exportar_edl(self._montar_timeline(), Path(arquivo), "premiere")
+                messagebox.showinfo("Sucesso", f"EDL exportado:\n{arquivo}")
+            except (OSError, ValueError) as e:
+                messagebox.showerror("EDL", str(e))
+
+    def _preset(self) -> RenderPreset:
+        return RenderPreset[self.preset_var.get()] if self.preset_var.get() in RenderPreset.__members__ \
+            else RenderPreset.FAST
+
+    def renderizar(self, saida: Optional[str] = None):
+        if not self.clips:
+            messagebox.showwarning("Aviso", "Importe videos primeiro!")
+            return
+        try:
+            self.timeline = self._montar_timeline()
+        except ValueError as e:
+            messagebox.showerror("Render", str(e))
+            return
+        preset = self._preset()
+        saida = saida or filedialog.asksaveasfilename(defaultextension=".mp4", filetypes=[("MP4", "*.mp4")])
+        if not saida:
+            return
+        tl = self.timeline
+
+        def tarefa():
+            self.renderer.renderizar(tl, Path(saida), preset)
+            self.qc_report = self.renderer.ultimo_qc
+
+            def fim():
+                if self.qc_report:
+                    self._mostrar_qc(self.qc_report)
+                messagebox.showinfo("Sucesso", f"Renderizacao concluida!\n{saida}")
+            self.ui.chamar(fim)
+        self.ui.em_segundo_plano(tarefa, ao_erro=lambda e: messagebox.showerror("Erro", f"Render falhou:\n{e}"),
+                                 nome="render")
+
+    def adicionar_fila(self, saida: Optional[str] = None):
+        if not self.clips:
+            messagebox.showwarning("Aviso", "Importe videos primeiro!")
+            return
+        saida = saida or filedialog.asksaveasfilename(title="Arquivo de saida deste projeto",
+                                                      defaultextension=".mp4", filetypes=[("MP4", "*.mp4")])
+        if not saida:
+            return
+        try:
+            tl = self._montar_timeline()
+        except ValueError as e:
+            messagebox.showerror("Fila", str(e))
+            return
+        # copia profunda (via dict): edicoes posteriores nao alteram o item da fila
+        projeto = {"nome": tl.projeto_nome, "saida": saida, "preset": self.preset_var.get(),
+                   "timeline": timeline_para_dict(tl)}
+        self.automation.adicionar_a_fila(projeto)
+        self.fila_label.config(text=f"Fila: {len(self.automation.fila_render)} projeto(s)")
+
+    def processar_fila(self):
+        if not self.automation.fila_render:
+            messagebox.showinfo("Fila", "A fila esta vazia.")
             return
 
         def tarefa():
-            self.log("Criando proxies...")
-            for video in self.videos:
-                proxy = self.automation.criar_proxy(video)
-                self.log(f"Proxy criado: {proxy.name}")
+            res = self.automation.processar_fila(self.renderer.renderizar)
+            ok = sum(1 for _, s, _ in res if s)
 
-        threading.Thread(target=tarefa, daemon=True).start()
+            def fim():
+                self.fila_label.config(text="Fila vazia")
+                texto = "\n".join(f"{'OK ' if s else 'ERRO'} {n}: {d}" for n, s, d in res)
+                messagebox.showinfo("Fila", f"{ok}/{len(res)} renderizado(s).\n\n{texto}")
+            self.ui.chamar(fim)
+        self.ui.em_segundo_plano(tarefa, ao_erro=lambda e: messagebox.showerror("Fila", str(e)), nome="fila")
 
-    def limpar_midia(self):
-        self.videos = []
-        self.lista_midia.delete(0, tk.END)
+    # ============================================================
+    # QC
+    # ============================================================
 
-    def novo_projeto(self):
-        self.videos = []
-        self.timeline = None
-        self.limpar_midia()
+    def _mostrar_qc(self, report: QCReport):
+        self.qc_result.delete(1.0, tk.END)
+        self.qc_result.insert(tk.END, report.texto())
 
-    def abrir_projeto(self):
-        messagebox.showinfo("Info", "Abrir projeto em desenvolvimento")
-
-    def salvar_projeto(self):
-        messagebox.showinfo("Info", "Salvar projeto em desenvolvimento")
-
-    def exportar_edl(self):
-        if not self.timeline:
-            messagebox.showwarning("Aviso", "Crie a timeline primeiro! (Importe midia e Renderize)")
+    def analisar_qc(self, arquivo: Optional[str] = None):
+        arquivo = arquivo or filedialog.askopenfilename(filetypes=[("Videos", " ".join("*" + e for e in EXTS_VIDEO))])
+        if not arquivo:
             return
+        self.qc_result.delete(1.0, tk.END)
+        self.qc_result.insert(tk.END, "Analisando...\n\n")
+        padrao = self.audio_standard.get()
 
-        arquivo = filedialog.asksaveasfilename(
-            defaultextension=".xml",
-            filetypes=[("Premiere XML", "*.xml"), ("DaVinci XML", "*.xml")]
-        )
+        def tarefa():
+            report = self.qc.analisar_video(Path(arquivo), padrao)
+            self.qc_report = report
+            self.ui.chamar(self._mostrar_qc, report)
 
-        if arquivo:
-            self.renderer.exportar_edl(self.timeline, Path(arquivo), "premiere")
-            messagebox.showinfo("Sucesso", f"EDL exportado:\n{arquivo}")
-
-    def renderizar(self):
-        if not self.videos:
-            messagebox.showwarning("Aviso", "Importe videos primeiro!")
-            return
-
-        self.timeline = ProjectTimeline(
-            clips=[
-                ClipTimeline(
-                    arquivo=v,
-                    inicio=0,
-                    fim=10,
-                    duracao=10,
-                    nome=v.name
-                ) for v in self.videos
-            ],
-            projeto_nome=self.projeto_nome.get(),
-            fps=int(self.fps_var.get())
-        )
-
-        preset_map = {
-            "DRAFT": RenderPreset.DRAFT,
-            "FAST": RenderPreset.FAST,
-            "BALANCED": RenderPreset.BALANCED,
-            "HIGH_QUALITY": RenderPreset.HIGH_QUALITY,
-            "MASTER": RenderPreset.MASTER
-        }
-        preset = preset_map.get(self.preset_var.get(), RenderPreset.FAST)
-
-        saida = filedialog.asksaveasfilename(
-            defaultextension=".mp4",
-            filetypes=[("MP4", "*.mp4")]
-        )
-
-        if saida:
-            def tarefa_render():
-                try:
-                    self.renderer.renderizar(self.timeline, Path(saida), preset)
-                    messagebox.showinfo("Sucesso", "Renderizacao concluida!")
-                except Exception as e:
-                    messagebox.showerror("Erro", f"Render falhou:\n{e}")
-
-            threading.Thread(target=tarefa_render, daemon=True).start()
-
-    def adicionar_fila(self):
-        if not self.videos:
-            messagebox.showwarning("Aviso", "Importe videos primeiro!")
-            return
-
-        projeto = {
-            "nome": self.projeto_nome.get(),
-            "videos": [str(v) for v in self.videos],
-            "preset": self.preset_var.get()
-        }
-        self.automation.adicionar_a_fila(projeto)
-        self.log(f"Projeto '{projeto['nome']}' adicionado a fila")
-
-    def analisar_qc(self):
-        arquivo = filedialog.askopenfilename(
-            filetypes=[("Videos", "*.mp4 *.mov *.avi *.mkv")]
-        )
-
-        if arquivo:
+        def falhou(e):
             self.qc_result.delete(1.0, tk.END)
-            self.qc_result.insert(tk.END, "Analisando...\n\n")
+            self.qc_result.insert(tk.END, f"Erro na analise:\n{e}")
+        self.ui.em_segundo_plano(tarefa, ao_erro=falhou, nome="qc")
 
-            def tarefa_qc():
-                try:
-                    report = self.qc.analisar_video(Path(arquivo))
-                    status = "APROVADO" if report.aprovado else "REPROVADO"
+    def exportar_relatorio_qc(self):
+        if not self.qc_report:
+            messagebox.showwarning("QC", "Analise um video primeiro.")
+            return
+        destino = filedialog.asksaveasfilename(defaultextension=".pdf",
+                                               filetypes=[("PDF", "*.pdf"), ("Texto", "*.txt")])
+        if destino:
+            self.qc.gerar_relatorio_pdf(self.qc_report, Path(destino))
+            messagebox.showinfo("QC", f"Relatorio salvo:\n{destino}")
 
-                    resultado = "=" * 55 + "\n"
-                    resultado += "         RELATORIO DE QC\n"
-                    resultado += "=" * 55 + "\n\n"
-                    resultado += f"  Resolucao:          {report.resolution}\n"
-                    resultado += f"  Codec:              {report.codec}\n"
-                    resultado += f"  Loudness Integrado: {report.loudness_integrated:.1f} LUFS\n"
-                    resultado += f"  True Peak:          {report.true_peak:.1f} dBTP\n"
-                    resultado += f"  Dropped Frames:     {report.dropped_frames}\n"
-                    resultado += f"  Black Frames:       {report.black_frames}\n\n"
-                    resultado += f"  MD5: {report.checksum_md5}\n\n"
-                    resultado += "=" * 55 + "\n"
-                    resultado += f"  STATUS: {status}\n"
-                    resultado += "=" * 55 + "\n"
-
-                    if report.problemas:
-                        resultado += "\nPROBLEMAS DETECTADOS:\n"
-                        for p in report.problemas:
-                            resultado += f"  - {p}\n"
-
-                    self.qc_result.delete(1.0, tk.END)
-                    self.qc_result.insert(tk.END, resultado)
-                except Exception as e:
-                    self.qc_result.delete(1.0, tk.END)
-                    self.qc_result.insert(tk.END, f"Erro na analise:\n{e}")
-
-            threading.Thread(target=tarefa_qc, daemon=True).start()
-
-    def preview(self):
-        messagebox.showinfo("Info", "Preview em desenvolvimento")
-
-    def ripple_edit(self):
-        messagebox.showinfo("Info", "Ripple Edit - selecione o ponto de corte")
-
-    def multicam(self):
-        messagebox.showinfo("Info", "Multicam em desenvolvimento")
-
-    def speed_ramp(self):
-        messagebox.showinfo("Info", "Speed Ramp em desenvolvimento")
-
-    def aplicar_lut(self, lut):
-        self.log(f"LUT selecionado: {lut}")
-        messagebox.showinfo("Color Grading", f"LUT '{lut}' sera aplicado na renderizacao.")
+    # ============================================================
+    # NAVEGACAO / AJUDA
+    # ============================================================
 
     def abrir_ia(self):
         if self.nb:
@@ -1299,18 +2162,24 @@ class VideoBuilderProV7:
         if self.nb:
             self.nb.select(7)
 
-    def aplicar_padrao_audio(self, padrao):
-        self.log(f"Padrao de audio selecionado: {padrao}")
+    def abrir_logs(self):
+        pasta = diretorio_config() / "logs"
+        pasta.mkdir(exist_ok=True)
+        try:
+            if os.name == "nt":
+                os.startfile(str(pasta))  # type: ignore[attr-defined]
+            else:
+                import subprocess
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(pasta)])
+        except OSError:
+            messagebox.showinfo("Logs", str(pasta))
 
     def sobre(self):
         messagebox.showinfo("Sobre",
-            "Video Builder Pro v7.0\n\n"
-            "Professional Suite\n\n"
-            "Plugins:\n"
-            "- video-automation\n"
-            "- color-grading-pro\n"
-            "- video-editor-senior\n"
-            "- Claude AI (roteiros e textos)")
+                            f"Video Builder Pro v{VERSAO}\n\nProfessional Suite\n\n"
+                            "Plugins:\n- video-automation\n- color-grading-pro\n- video-editor-senior\n"
+                            "- Claude AI (roteiros e textos)\n\n"
+                            f"Logs: {diretorio_config() / 'logs'}")
 
 
 # ============================================================
@@ -1319,7 +2188,7 @@ class VideoBuilderProV7:
 
 def main():
     root = tk.Tk()
-    app = VideoBuilderProV7(root)
+    VideoBuilderProV7(root)
     root.mainloop()
 
 

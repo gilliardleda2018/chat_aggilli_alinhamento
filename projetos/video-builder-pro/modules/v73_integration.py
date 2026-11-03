@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-V7.3 INTEGRATION - Video Builder Pro
+V7.3 INTEGRATION - Video Builder Pro (mantido por compatibilidade; a UI v7.7 nao usa)
 Integra todos os novos modulos no app principal
 """
 
@@ -67,8 +67,8 @@ class V73Integration:
 
     def gerar_legendas_video(self, video: Path, saida_srt: Path,
                             modelo: str = "base") -> Path:
-        """Gera legendas para video"""
-        return self.subtitles.gerar_legendas(video, "pt", modelo, "srt")
+        """Gera legendas para video (v7.7: respeita saida_srt)"""
+        return self.subtitles.gerar_legendas(video, "pt", modelo, "srt", saida=saida_srt)
 
     def converter_vertical_rapido(self, video: Path, saida: Path,
                                   modo: str = "center") -> Path:
