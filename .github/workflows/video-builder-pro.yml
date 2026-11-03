@@ -138,6 +138,24 @@ jobs:
         with:
           name: instalador-linux
           path: projetos/video-builder-pro/dist/instalador/*.deb
+      - name: Versao (para a pre-release de teste)
+        id: v
+        if: github.event_name == 'pull_request'
+        run: echo "versao=$(python instalador/versao.py)" >> "$GITHUB_OUTPUT"
+      # Em PRs, o .deb tambem vira uma PRE-RELEASE de teste (link direto para baixar e
+      # testar, sem login nem zip). A tag e criada pelo proprio GITHUB_TOKEN e nao
+      # dispara outro workflow. A versao oficial continua sendo a tag v*.
+      - name: Pre-release de teste (.deb)
+        if: github.event_name == 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: teste-deb-${{ steps.v.outputs.versao }}
+          target_commitish: ${{ github.event.pull_request.head.sha }}
+          name: "Teste .deb ${{ steps.v.outputs.versao }} (nao oficial)"
+          body: "Build de TESTE gerado pelo PR #${{ github.event.pull_request.number }} (commit ${{ github.event.pull_request.head.sha }}). Nao e a versao oficial."
+          prerelease: true
+          overwrite_files: true
+          files: projetos/video-builder-pro/dist/instalador/*.deb
 
   pre-release-teste:
     if: startsWith(github.ref, 'refs/tags/teste-')

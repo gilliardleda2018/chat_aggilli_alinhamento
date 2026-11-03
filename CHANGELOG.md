@@ -55,8 +55,8 @@ O CI (`.github/workflows/video-builder-pro.yml`) passa a rodar a suite inteira e
   para `contexto_2026-10-23_empacotamento.md` (o conteudo e a nota de contexto do empacotamento de 23/10).
 
 ### Pre-release de teste (.deb)
-- Tag `teste-*` (ex.: `teste-deb-7.8`) roda testes + Linux e publica o `.deb` como **pre-release** marcada
-  "nao oficial". Motivo: os artefatos do Actions ficam num armazenamento que exige login/zip; a release da
+- Todo PR publica o `.deb` como **pre-release** `teste-deb-<versao>` marcada "nao oficial" (a tag e criada
+  pelo proprio CI). Uma tag `teste-*` enviada manualmente faz o mesmo sem o job Windows. Motivo: os artefatos do Actions ficam num armazenamento que exige login/zip; a release da
   um link direto para baixar e testar. O Windows nao roda nessas tags (o .exe sera gerado depois).
 
 ### Como publicar a versao oficial
