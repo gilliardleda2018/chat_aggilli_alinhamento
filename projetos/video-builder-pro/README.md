@@ -14,6 +14,17 @@ Editor de vídeo profissional em Python + Tkinter com FFmpeg e Claude AI.
 | v7.0 | 22/10/2026 | Claude AI integrada | ✅ Estável |
 | v6.0 | - | Legado | 📦 Arquivo |
 
+## Instalar (usuários)
+
+Baixe em **Releases** do GitHub:
+
+- **Windows:** `VideoBuilderPro-Setup-<versão>.exe`. Não precisa de administrador nem de Python ou FFmpeg (já vêm junto).
+- **Linux (Debian/Ubuntu):** `sudo apt install ./video-builder-pro_<versão>_amd64.deb`. Depois, procure "Video Builder Pro" no menu ou rode `video-builder-pro`.
+
+Configurações, chave da API e logos ficam em `~/.video_builder_pro/` e sobrevivem a reinstalações. Estilos e LUTs próprios podem ser colocados em `~/.video_builder_pro/estilos/` e `~/.video_builder_pro/luts/`.
+
+Para gerar os instaladores: logo em `assets/logo_aggilli.png` e uma tag `v*`. Os detalhes estão em `CHANGELOG.md` e no workflow `.github/workflows/video-builder-pro.yml`.
+
 ## v7.8 - Diretor IA
 
 ```bash

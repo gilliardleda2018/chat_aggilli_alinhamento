@@ -1,5 +1,168 @@
 # Changelog - Video Builder Pro
 
+## [v7.9.1] - 2026-11-04 - Motor local: resposta em streaming e diagnostico correto de lentidao
+
+Relato do usuario no 1o uso do Ollama: "Erro: Ollama nao esta rodando em
+http://localhost:11434 (timed out)".
+
+### Diagnostico
+| Fato | Conclusao |
+|---|---|
+| A falha foi "timed out", nao "connection refused" | Com o Ollama desligado a conexao e recusada na hora. Tempo esgotado = servidor no ar, mas sem responder a tempo. A mensagem "nao esta rodando" estava **errada** (v7.9 tratava todo erro de rede igual). |
+| v7.9 pedia a resposta inteira de uma vez (`stream: false`) com limite de 600 s | Um 7b na CPU (sem placa de video) gera poucas palavras por segundo; um roteiro de ate 2500 tokens pode passar de 10 min e estourar o limite sem mostrar nada. |
+
+### Decisoes (e por que)
+| Decisao | Motivo | Teste |
+|---|---|---|
+| `chat()` em **streaming** (`stream: true`, NDJSON) | O limite de tempo passa a valer por **pausa** (300 s sem nenhuma palavra, inclui carregar o modelo), nao pela resposta inteira: textos longos na CPU nao estouram mais. | L13, L14, CI `ollama-real` |
+| Texto **surgindo na tela** na aba IA (no maximo ~3 atualizacoes/s) | O usuario ve que esta funcionando em vez de esperar minutos sem retorno. | L15 |
+| Callback de progresso **por thread** (`definir_progresso`) | O Diretor IA roda em outra thread e nao pode escrever na caixa da aba IA. Removido ao terminar (try/finally). | L15 |
+| Erros separados: tempo esgotado -> "esta rodando, mas ficou N s sem responder" + sugestao de modelo menor; recusada -> "nao esta rodando" + instrucoes | Cada mensagem leva a acao certa. | L14, L05 |
+| Conexao cai no meio da resposta -> usa o texto ja recebido (registrado no log) | Nao jogar fora minutos de geracao por uma queda no fim. | - |
+| Servidor de teste agora responde em streaming como o real (e em threads) | Os testes seguem o protocolo real. | L02-L15 |
+| `VERSAO = "7.9.1"` | Pre-release `teste-deb-7.9.1`. | CI |
+
+### Garantia de "sem regressao"
+| Suite | Antes | Depois |
+|---|---|---|
+| todas as anteriores | 127/127 | 127/127 (L02 ajustado: `stream` agora e `true`) |
+| novos L13-L15 | - | 3/3 |
+
+## [v7.9] - 2026-11-04 - Motor de IA local e gratuito (Ollama), ao lado do Claude
+
+Branch `feat/instalador` (PR #3). Pedido do usuario: sem saldo na API da Anthropic,
+usar uma IA que nao dependa de creditos. Opcao escolhida: **IA local via Ollama**.
+(Usar a assinatura do claude.ai como motor nao e permitido pelos termos da Anthropic
+desde fev/2026, por isso nao foi feito.)
+
+### Decisoes (e por que)
+| Decisao | Motivo | Teste |
+|---|---|---|
+| Novo `modules/motor_local.py` falando com o servidor do Ollama pela API HTTP documentada (`POST /api/chat`, `GET /api/tags`) | Gratis, sem limite e offline depois de baixar o modelo. Nenhum codigo do Ollama (MIT) e copiado; os modelos (Qwen 2.5 Apache-2.0 nas versoes 0.5b/1.5b/7b/14b, Llama 3.2 licenca comunitaria Meta) sao baixados pelo proprio usuario com `ollama pull` e nao vao no instalador. | L01-L05 |
+| `urllib` da biblioteca padrao, **ignorando proxy do sistema** | Sem dependencia nova no pacote; um `http_proxy` configurado no Debian desviaria a conexao para `localhost`. | L02 |
+| `ClaudeEngine` mantem o nome e passa a **despachar** para o motor ativo (`motor_ia` = `claude` ou `ollama`) | Aba IA, Diretor IA, retakes e Revisor ja chamam `self.claude.mensagem(...)`: nenhum deles precisou mudar a chamada, so a checagem `tem_chave()` -> `pronto()`. | L06-L08 |
+| **Claude continua o padrao**; motor invalido na config volta para Claude | Sem regressao para quem ja usa a API: nada muda ate o usuario escolher Ollama. | L06 |
+| Modelos separados (`claude_model` e `ollama_model`) | Trocar de motor nao apaga a escolha do outro. | L07 |
+| Blocos da Anthropic convertidos (texto + imagens base64 -> `images`); imagens so vao para modelos com visao (llava, qwen2.5vl, gemma3...) | O Revisor envia quadros do video; um modelo so-texto ignoraria ou recusaria. Com modelo sem visao a revisao fica tecnica (registrado no log). | L03 |
+| Erro do motor local durante a edicao -> plano heuristico | Modelos pequenos as vezes devolvem JSON invalido; o Diretor ja caia na heuristica e documenta isso no relatorio (comportamento da v7.8 preservado). | L11 |
+| Aba IA: quadro **"Motor de IA"** (Claude / Ollama, modelo local, "Atualizar lista", "Testar motor") com instrucoes de instalacao e **modelo sugerido pela RAM** | O usuario instala e configura sem sair do app. Limites de RAM ~1 GB abaixo do nominal (o Linux reporta 8 GB como ~7,6). | L09, L10, L05 |
+| Diretor IA mostra o motor ativo e se atualiza na troca (`app.ao_mudar_motor`) | Evita a duvida "qual IA esta editando?". | L11 |
+| Erros da API do Claude **traduzidos** (sem credito, chave recusada, 429, sobrecarga, modelo inexistente) com o detalhe tecnico no final | O erro em ingles "credit balance is too low" foi o que o usuario viu; agora diz o que fazer e sugere o motor local. | L12 |
+| CI: job `ollama-real` instala o Ollama oficial, baixa `qwen2.5:0.5b` e gera titulos pelo motor do app (sobe `ollama serve` na mao: o runner nao tem systemd; a 1a execucao falhou exatamente por isso, e a instrucao do app ganhou a dica `ollama serve`) | Os testes L usam um servidor que imita o Ollama; este job prova a integracao com o servidor real. | CI |
+| Instrucao de instalacao usa `su - -c` (com hifen) | No 1o teste do usuario, `su -c` nao trouxe `/usr/sbin` para o PATH (Debian) e o instalador do Ollama falhou em `useradd: not found`, sem criar o usuario nem o servico. | L05 |
+| `motor_local` nos `hiddenimports` do PyInstaller; `VERSAO = "7.9"` | O modulo entra no .deb/.exe; pre-release de teste `teste-deb-7.9`. | CI |
+
+### Garantia de "sem regressao"
+| Suite | Antes | Depois |
+|---|---|---|
+| regressao + defeitos + diretor + instalador + correcoes 7.8.1 | 115/115 | 115/115 |
+| `tests/test_motor_local.py` (novos, L01-L12) | - | 12/12 |
+| Tk real (xvfb): aba IA com Ollama selecionado (captura conferida) | - | ok |
+
+## [v7.8.1] - 2026-11-04 - Correcoes do 1o teste do .deb no Debian (importacao de midia e chave da API)
+
+Branch `feat/instalador` (PR #3). Relato do usuario apos instalar `video-builder-pro_7.8_amd64.deb`:
+"a importacao da midia, dos videos para edicao nao esta funcionando; o salvamento da chave
+api da ia (Claude) nao esta ficando salva, quando mudo a aba ela some".
+
+### Diagnostico (causa raiz, reproduzida antes de corrigir)
+| Sintoma | Causa | Como foi confirmado |
+|---|---|---|
+| Nenhum video entra na timeline | O app empacotado (PyInstaller) define `LD_LIBRARY_PATH=/opt/aggilli/video-builder-pro/_internal`. Os subprocessos herdavam isso, e o `ffprobe`/`ffmpeg` **do sistema** carregavam a `libstdc++` antiga do pacote (Ubuntu 22.04). No Debian do usuario o ffmpeg exige `GLIBCXX_3.4.32`, entao o `ffprobe` morria e todo arquivo era "invalido", sem mensagem na tela. | `LD_LIBRARY_PATH=_internal /usr/bin/ffprobe -version` -> `GLIBCXX_3.4.32 not found`; o `--verificar` do pacote mostrava `"ffmpeg_versao": "?"` e mesmo assim `ok: true`. |
+| Dialogo nao mostra `VIDEO.MP4` | O filtro do Tk no Linux diferencia maiusculas (`*.mp4` nao casa `.MP4`, padrao de cameras/celulares). | Teste C04b. |
+| "A chave some ao mudar de aba" | (1) Colar a chave e trocar de aba **sem clicar em Salvar** perdia a chave; (2) depois de salva, o campo ficava vazio por seguranca (decisao D44 da v7.7) e parecia que a chave tinha sumido, sem indicacao de que estava salva. | Harness com Tk real (xvfb): a chave salva persistia; a colada e nao salva se perdia. |
+
+### Decisoes (e por que)
+| Decisao | Motivo | Teste |
+|---|---|---|
+| `isolar_subprocessos()` (em `ffmpeg_utils`), chamado no inicio do `rodar_v78.main()`: no app empacotado e fora do Windows, todo `subprocess.Popen` recebe `env` sem o `LD_LIBRARY_PATH` do pacote (restaura `LD_LIBRARY_PATH_ORIG` se existir) | Corrige na origem para TODOS os programas externos (ffmpeg, ffprobe, yt-dlp, xdg-open...), sem precisar mexer em cada chamada. O proprio app continua usando as libs dele. Em codigo-fonte e no Windows nao muda nada. Idempotente. | C01, C02 |
+| Filtros de arquivo com maiusculas e minusculas + "Todos os arquivos" (`tipos_video()`/`tipos_midia()` unicos para base, v76 e Diretor IA) | Arquivos `.MP4`/`.MOV` de camera apareciam ocultos. Uma fonte so evita divergencia entre abas. | C03, C04b |
+| Importacao mostra **quais** arquivos falharam e por que | Antes a falha so ia para o log; o usuario via "nada acontece". | C04 |
+| `--verificar` reprova se ffmpeg/ffprobe nao rodam e faz uma **importacao real** de um video gerado | O verificar antigo dava `ok: true` com o ffprobe quebrado; foi por isso que o CI nao pegou o defeito. | C09 |
+| CI instala o `.deb` em containers **Debian 12 e Debian 13** limpos e roda o `--verificar` | O teste anterior rodava no mesmo Ubuntu do build (mesma libstdc++), onde o defeito nao aparece. | CI |
+| Campo da chave mostra uma **mascara** (`************************`, que NAO e a chave) + rotulo verde "Chave salva (termina em ...XXXX) - onde" | Mantem a decisao de seguranca da v7.7 (a chave nao volta para o widget) e mostra claramente que esta salva. | C05, D44 (atualizado) |
+| **Salvamento automatico** ao sair do campo ou trocar de aba, quando o texto comeca com `sk-ant-` | Era exatamente o relato: colar, mudar de aba, perder. Texto sem `sk-ant-` nao e salvo sozinho (pergunta ao clicar Salvar). | C10, Tk real |
+| Botao **Testar chave** (GET `/v1/models`, em segundo plano) e Enter salva | Confirma que a chave funciona sem gastar tokens; erros 401/403 e falta de rede viram mensagens claras. | C06, C08 |
+| `onde_esta_chave` tolera erro do cofre (keyring) | Cofre bloqueado derrubava a montagem da aba IA; agora cai no arquivo (chmod 600). | C07 |
+| `--verificar` informa o isolamento ja feito pelo `main()` | No 1o CI no Debian o relatorio dizia `subprocessos_isolados: false` (2a chamada e no-op), embora o ffprobe do sistema rodasse. Diagnostico tem que ser fiel. | C11 |
+| `VERSAO = "7.8.1"` | A pre-release de teste vira `teste-deb-7.8.1`, separada da 7.8 com defeito. | I07 |
+
+### Garantia de "sem regressao"
+| Suite | Antes | Depois |
+|---|---|---|
+| regressao + defeitos + diretor + instalador | 103/103 | 103/103 (D44 ajustado a mascara: a chave continua fora do campo) |
+| `tests/test_correcoes_781.py` (novos, C01-C11) | - | 12/12 |
+| Verificacao com Tk real (xvfb): colar chave -> trocar todas as abas -> chave salva e mascarada; importar `CLIP.MP4` com `LD_LIBRARY_PATH` do pacote simulado | - | ok |
+
+## [v7.8 - instalador] - 2026-11-03 - Instaladores Windows (.exe) e Linux (.deb) com o logo da Aggilli
+
+Branch `feat/instalador`, empilhada sobre `feat/v7.8-diretor-ia` (PR #2).
+
+### Garantia de "sem regressao"
+| Suite | Antes | Depois |
+|---|---|---|
+| regressao + defeitos + diretor | 93/93 | 93/93 |
+| `tests/test_instalador.py` (novos, I01-I10) | - | 10/10 |
+| **Total** | 93 | **103/103** |
+O CI (`.github/workflows/video-builder-pro.yml`) passa a rodar a suite inteira em todo PR.
+
+### Decisoes (e por que)
+| Decisao | Motivo |
+|---|---|
+| Build no **GitHub Actions** (windows-latest + ubuntu-22.04) | O `.exe` do Windows precisa ser gerado no Windows; o runner faz isso de graca e de forma reproduzivel. Ubuntu 22.04 (glibc 2.35) para o binario rodar tambem no Debian 12. |
+| PyInstaller **onedir** (pasta) em vez de onefile | O onefile de 151 MB da v7.6 se descompactava a cada abertura (lento). Num instalador, a pasta abre rapido e atualiza melhor. |
+| **Inno Setup 6** no Windows | Assistente moderno em portugues, imagens do logo, atalhos, desinstalador; instala por usuario SEM pedir administrador. |
+| `.deb` com `Depends: ffmpeg` no Linux | O apt mantem o FFmpeg atualizado; no Windows (sem gerenciador padrao) o FFmpeg vai embutido (build BtbN GPL, licenca incluida em `bin/`). |
+| **faster-whisper embutido** | Sem PyTorch (~250 MB): o Diretor IA transcreve palavra a palavra logo apos instalar, sem `pip install`. Os modelos baixam na 1a transcricao. |
+| Builds de teste com monograma neutro "VB" | O logo oficial nao estava no repositorio e nao deve ser inventado. O PR valida todo o pipeline; a release oficial (tag `v*`) FALHA sem `assets/logo_aggilli.png`. |
+| `pasta_app()` em vez de `Path(__file__).parent.parent` | No app empacotado esse caminho aponta para fora do pacote (estilos, LUTs e bin sumiriam). |
+| Estilos e LUTs do usuario em `~/.video_builder_pro/` | Com o app em Program Files (somente leitura), o usuario ainda pode criar/editar estilos e LUTs. |
+| `--verificar [arquivo.json]` no launcher | O CI testa o executavel gerado E o app depois de instalado (instalacao silenciosa no Windows; `apt install` do .deb no Linux). O .exe sem console grava o resultado em arquivo. |
+
+### Adicionado
+| Arquivo | O que faz | Teste |
+|---|---|---|
+| `assets/README.md` | Onde colocar o logo oficial (`logo_aggilli.png`/`.svg`) | - |
+| `instalador/gerar_icones.py` | Logo -> `icone.ico` (16-256 px), PNG 256/512, imagens do assistente (1x e 2x DPI); `--sem-logo` para teste | I06 |
+| `instalador/versao.py` | Versao unica (VERSAO do app) + metadados do .exe ("Aggilli Intelligence") | I07 |
+| `instalador/video_builder_pro.spec` | PyInstaller (Windows/Linux), FFmpeg e pacotes opcionais | CI |
+| `instalador/instalador_windows.iss` | Inno Setup: pt-BR, logo, atalhos, desinstalador, por usuario | CI |
+| `instalador/build_deb.sh` | Pacote .deb: /opt/aggilli, comando `video-builder-pro`, menu, icone | I08 + CI |
+| `.github/workflows/video-builder-pro.yml` | testes -> exe + deb -> testes de instalacao -> Release (em tags) | - |
+
+### Alterado
+- `modules/ffmpeg_utils.py`: `pasta_app()`, `preparar_ffmpeg_embutido()` (I01, I02).
+- `modules/diretor_ia.py`: estilos do app + do usuario (I03). `luts_manager.py`: LUTs do usuario (I04).
+  `upscaler.py`, `definitive_downloader.py`: caminhos via `pasta_app()`.
+- `rodar_v78.py`: FFmpeg embutido no PATH, icone da janela, `--verificar` (I05).
+
+### Logotipo (03/11/2026)
+- `assets/logo_aggilli.png`: logo enviado pelo usuario, **sem a linha "OBRAS INTELLIGENCE"** (removida a pedido).
+- `assets/simbolo_aggilli.png` e `assets/texto_aggilli.png`: simbolo e nome separados automaticamente.
+  Motivo: o logo e horizontal (~3,4:1); num icone de 16-48 px o nome vira borrao, o simbolo continua legivel.
+- `gerar_icones.py`: icones e cabecalho usam o simbolo; a imagem lateral empilha simbolo + nome (testes I09, I10).
+
+### Corrigido: repositorio nao clonava no Windows
+- O arquivo `projetos/video-builder-pro/projetos/video-builder-pro/Nota Esta versão é mantida como fallback
+  estável. Para novos recursos, use v7.2.` terminava em ponto, nome invalido no Windows: o `git clone`/checkout
+  falhava (detectado pelo job Windows do CI). Renomeado com `git mv` (historico preservado), conteudo intacto,
+  para `contexto_2026-10-23_empacotamento.md` (o conteudo e a nota de contexto do empacotamento de 23/10).
+
+### Pre-release de teste (.deb)
+- Todo PR publica o `.deb` como **pre-release** `teste-deb-<versao>` marcada "nao oficial" (a tag e criada
+  pelo proprio CI). Uma tag `teste-*` enviada manualmente faz o mesmo sem o job Windows. Motivo: os artefatos do Actions ficam num armazenamento que exige login/zip; a release da
+  um link direto para baixar e testar. O Windows nao roda nessas tags (o .exe sera gerado depois).
+
+### Como publicar a versao oficial
+1. Adicionar `projetos/video-builder-pro/assets/logo_aggilli.png` (commit).
+2. `git tag v7.8.0 && git push origin v7.8.0` -> o Actions gera e publica `VideoBuilderPro-Setup-7.8.exe`
+   e `video-builder-pro_7.8_amd64.deb` em Releases.
+
+### Limitacoes
+- O executavel do Windows nao e assinado digitalmente: o SmartScreen mostra "Editor desconhecido" ate
+  que se use um certificado de assinatura de codigo (pago).
+- Modulos pesados (WhisperX, Demucs, GFPGAN) continuam fora do instalador (PyTorch tem varios GB).
+
 ## [v7.8] - 2026-11-03 - Sprint A: Diretor IA (edicao autonoma)
 
 Branch `feat/v7.8-diretor-ia`, empilhada sobre `fix/v7.7-correcoes-auditoria` (PR #1).

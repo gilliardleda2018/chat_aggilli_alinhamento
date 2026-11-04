@@ -1,0 +1,240 @@
+# ============================================================================
+# Video Builder Pro - testes + instaladores (Windows .exe e Linux .deb)
+#
+# Quando roda:
+#   - Pull request que mexe em projetos/video-builder-pro: testes + build de TESTE
+#     (sem o logo oficial, usa monograma neutro "VB").
+#   - Manual (Actions > Video Builder Pro > Run workflow).
+#   - Tag v* (ex.: v7.8.0): build OFICIAL - exige assets/logo_aggilli.png e
+#     publica os instaladores numa Release do GitHub.
+#   - Tag teste-* (ex.: teste-deb-7.8): so testes + .deb, publicado como
+#     PRE-RELEASE de teste (para instalar e testar antes da versao oficial).
+# ============================================================================
+name: Video Builder Pro
+
+on:
+  pull_request:
+    paths: ["projetos/video-builder-pro/**", ".github/workflows/video-builder-pro.yml"]
+  workflow_dispatch:
+  push:
+    tags: ["v*", "teste-*"]
+
+permissions:
+  contents: write
+
+env:
+  OFICIAL: ${{ startsWith(github.ref, 'refs/tags/v') }}
+  PIP_PACOTES: "pyinstaller>=6.10 pillow requests yt-dlp keyring numpy faster-whisper"
+
+defaults:
+  run:
+    working-directory: projetos/video-builder-pro
+
+jobs:
+  testes:
+    # 24.04 = FFmpeg 6.1, o mesmo usado no desenvolvimento dos testes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: Dependencias
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+          python -m pip install -q pytest numpy pillow requests
+      - name: Suite completa (regressao + defeitos + diretor)
+        run: python -m pytest tests -q
+
+  # v7.9: os testes L01-L12 usam um servidor que IMITA o Ollama. Este job confere o
+  # motor local contra o Ollama OFICIAL, com um modelo pequeno (qwen2.5:0.5b, ~400 MB),
+  # pelo mesmo caminho do app (ClaudeEngine -> motor_local -> POST /api/chat).
+  ollama-real:
+    if: ${{ !startsWith(github.ref, 'refs/tags/teste-') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Instalar Ollama e baixar modelo pequeno
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          # O runner nao tem systemd ativo: sobe o servidor na mao (no desktop o servico sobe sozinho)
+          curl -sf http://localhost:11434/api/tags >/dev/null || (nohup ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &)
+          for i in $(seq 1 30); do curl -sf http://localhost:11434/api/tags >/dev/null && break; sleep 2; done
+          ollama pull qwen2.5:0.5b
+      - name: Gerar texto pelo motor do app
+        env: { HOME: "${{ runner.temp }}/home" }
+        run: |
+          mkdir -p "$HOME"
+          python - <<'EOF'
+          import sys; sys.path[:0] = [".", "modules"]
+          import video_builder_pro_v7_suite as base
+          eng = base.ClaudeEngine(base.ConfigManager(), print)
+          eng.definir_motor("ollama"); eng.definir_modelo("qwen2.5:0.5b")
+          ok, msg = eng.testar_motor(); print(msg); assert ok, msg
+          parciais = []; eng.definir_progresso(parciais.append)     # v7.9.1: streaming real
+          t = eng.titulos("cafe especial"); print(t); assert len(t) > 20
+          eng.definir_progresso(None); print("trechos recebidos:", len(parciais)); assert len(parciais) > 3
+          print(eng.mensagem("Responda so com a palavra OK.", max_tokens=10))
+          EOF
+
+  windows:
+    needs: testes
+    if: ${{ !startsWith(github.ref, 'refs/tags/teste-') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Dependencias de build
+        shell: pwsh
+        run: python -m pip install -q $env:PIP_PACOTES.Split(' ')
+      - name: Icones a partir do logo
+        shell: pwsh
+        run: |
+          if ($env:OFICIAL -eq 'true') { python instalador/gerar_icones.py } else { python instalador/gerar_icones.py --sem-logo }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Versao
+        id: v
+        shell: pwsh
+        run: |
+          $v = python instalador/versao.py
+          "versao=$v" >> $env:GITHUB_OUTPUT
+      - name: FFmpeg embutido (BtbN, GPL)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
+          New-Item -ItemType Directory -Force instalador/ffmpeg | Out-Null
+          $raiz = Get-ChildItem ffmpeg_tmp -Directory | Select-Object -First 1
+          Copy-Item "$($raiz.FullName)/bin/ffmpeg.exe","$($raiz.FullName)/bin/ffprobe.exe","$($raiz.FullName)/bin/ffplay.exe" instalador/ffmpeg/
+          Copy-Item "$($raiz.FullName)/LICENSE.txt" instalador/ffmpeg/LICENSE-ffmpeg.txt
+      - name: PyInstaller
+        shell: pwsh
+        run: pyinstaller --noconfirm instalador/video_builder_pro.spec
+      - name: Verificar executavel
+        shell: pwsh
+        run: |
+          $p = Start-Process dist/VideoBuilderPro/VideoBuilderPro.exe -ArgumentList "--verificar","$PWD/verif.json" -Wait -PassThru
+          Get-Content verif.json
+          if ($p.ExitCode -ne 0) { throw "verificacao falhou ($($p.ExitCode))" }
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.v.outputs.versao }} instalador/instalador_windows.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Testar instalacao silenciosa
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist/instalador/*.exe | Select-Object -First 1
+          $p = Start-Process $setup.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/CURRENTUSER","/NORESTART","/DIR=$env:RUNNER_TEMP\vbp" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "instalador falhou ($($p.ExitCode))" }
+          $q = Start-Process "$env:RUNNER_TEMP\vbp\VideoBuilderPro.exe" -ArgumentList "--verificar","$PWD/verif2.json" -Wait -PassThru
+          Get-Content verif2.json
+          if ($q.ExitCode -ne 0) { throw "app instalado falhou na verificacao" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instalador-windows
+          path: projetos/video-builder-pro/dist/instalador/*.exe
+
+  linux:
+    needs: testes
+    # 22.04 (glibc 2.35): o executavel tambem roda no Debian 12 / Ubuntu 22.04+
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Dependencias de build
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+          python -c "import tkinter; print('tk', tkinter.TkVersion)"
+          python -m pip install -q $PIP_PACOTES
+      - name: Icones a partir do logo
+        run: |
+          if [ "$OFICIAL" = "true" ]; then python instalador/gerar_icones.py; else python instalador/gerar_icones.py --sem-logo; fi
+      - name: PyInstaller
+        run: pyinstaller --noconfirm instalador/video_builder_pro.spec
+      - name: Verificar executavel
+        run: dist/VideoBuilderPro/VideoBuilderPro --verificar
+      - name: Pacote .deb
+        run: bash instalador/build_deb.sh
+      - name: Testar instalacao do .deb
+        run: |
+          sudo apt-get install -y -q ./dist/instalador/*.deb
+          video-builder-pro --verificar
+          test -f /usr/share/applications/video-builder-pro.desktop
+          sudo apt-get remove -y -q video-builder-pro
+      # v7.8.1: o teste acima roda no MESMO Ubuntu do build e nao pegou o defeito do
+      # Debian do usuario (ffprobe do sistema herdava a libstdc++ antiga do pacote:
+      # "GLIBCXX_3.4.32 not found" -> importacao de video falhava). Agora o .deb e
+      # instalado em Debian 12 e 13 limpos e o --verificar (que importa um video
+      # de teste de verdade) precisa passar em cada um.
+      - name: Testar .deb em Debian 12 e Debian 13 (containers limpos)
+        run: |
+          for img in debian:12 debian:13; do
+            echo "::group::$img"
+            docker run --rm -v "$PWD/dist/instalador:/deb:ro" "$img" sh -ec '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -q >/dev/null
+              apt-get install -y -q /deb/*.deb >/dev/null
+              video-builder-pro --verificar /tmp/v.json || { cat /tmp/v.json; exit 1; }
+              cat /tmp/v.json'
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instalador-linux
+          path: projetos/video-builder-pro/dist/instalador/*.deb
+      - name: Versao (para a pre-release de teste)
+        id: v
+        if: github.event_name == 'pull_request'
+        run: echo "versao=$(python instalador/versao.py)" >> "$GITHUB_OUTPUT"
+      # Em PRs, o .deb tambem vira uma PRE-RELEASE de teste (link direto para baixar e
+      # testar, sem login nem zip). A tag e criada pelo proprio GITHUB_TOKEN e nao
+      # dispara outro workflow. A versao oficial continua sendo a tag v*.
+      - name: Pre-release de teste (.deb)
+        if: github.event_name == 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: teste-deb-${{ steps.v.outputs.versao }}
+          target_commitish: ${{ github.event.pull_request.head.sha }}
+          name: "Teste .deb ${{ steps.v.outputs.versao }} (nao oficial)"
+          body: "Build de TESTE gerado pelo PR #${{ github.event.pull_request.number }} (commit ${{ github.event.pull_request.head.sha }}). Nao e a versao oficial."
+          prerelease: true
+          overwrite_files: true
+          files: projetos/video-builder-pro/dist/instalador/*.deb
+
+  pre-release-teste:
+    if: startsWith(github.ref, 'refs/tags/teste-')
+    needs: linux
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: instalador-linux, path: artefatos }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artefatos/*
+          prerelease: true
+          name: "Teste ${{ github.ref_name }} (nao oficial)"
+          body: "Build de TESTE para validacao. Nao e a versao oficial."
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artefatos, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artefatos/*
+          generate_release_notes: true

@@ -48,15 +48,16 @@ from auto_editor import AutoEditor  # noqa: E402
 from auto_suite import AutoAudioAI, AutoCaptionAI, AutoColorAI, AutoEditorAI, AutoFormatAI  # noqa: E402
 from ffmpeg_utils import (PADROES_LOUDNESS, abrir_no_player, binario, cadeia_atempo,  # noqa: E402
                           executar, executar_com_progresso, info_midia, medir_loudness,
-                          normalizar_loudness, padrao_loudness)
+                          normalizar_loudness, padrao_loudness, tipos_midia, tipos_video)
 from gpu_encoder import GPUEncoder, GPUType  # noqa: E402
 from luts_manager import LUTManager  # noqa: E402
 from subtitles_ai import SubtitlesAI  # noqa: E402
 from transitions_gl import EasingType, GLTransition, GLTransitionsEngine  # noqa: E402
 from vertical_converter import CropMode, VerticalConverter  # noqa: E402
 
-VIDEOS = [("Videos", "*.mp4 *.mov *.avi *.mkv *.m4v *.webm")]
-MIDIA = [("Audio/Video", "*.mp3 *.wav *.m4a *.flac *.aac *.ogg *.mp4 *.mov *.avi *.mkv *.m4v *.webm")]
+# v7.8.1: maiusculas e minusculas (o dialogo do Tk no Linux diferencia: .MP4)
+VIDEOS = tipos_video()
+MIDIA = tipos_midia()
 MP4 = [("MP4", "*.mp4")]
 
 

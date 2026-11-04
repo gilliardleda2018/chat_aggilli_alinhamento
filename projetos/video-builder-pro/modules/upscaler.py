@@ -25,9 +25,9 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    from ffmpeg_utils import executar, executar_com_progresso, info_midia
+    from ffmpeg_utils import executar, executar_com_progresso, info_midia, pasta_app
 except ImportError:
-    from .ffmpeg_utils import executar, executar_com_progresso, info_midia
+    from .ffmpeg_utils import executar, executar_com_progresso, info_midia, pasta_app
 
 # escala pedida -> (modelo, fator do modelo, fator final)
 MODOS = {
@@ -42,7 +42,7 @@ def localizar_realesrgan() -> Optional[str]:
         p = shutil.which(nome)
         if p:
             return p
-        local = Path(__file__).resolve().parent.parent / "bin" / nome
+        local = pasta_app() / "bin" / nome
         if local.is_file():
             return str(local)
     return None

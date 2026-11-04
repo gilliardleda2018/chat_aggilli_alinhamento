@@ -30,6 +30,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -57,13 +58,14 @@ if str(_MODULOS) not in sys.path:
 from ffmpeg_utils import (FFmpegErro, abrir_no_player, cadeia_atempo, diretorio_config,  # noqa: E402
                           executar, executar_com_progresso, info_midia, md5_arquivo,
                           medir_loudness, normalizar_loudness, obter_logger, padrao_loudness,
-                          PADROES_LOUDNESS, proteger)
+                          PADROES_LOUDNESS, proteger, tipos_video, tipos_midia, EXTS_AUDIO)
 from luts_manager import LUTManager  # noqa: E402
 from transitions_gl import GLTransition, GLTransitionsEngine  # noqa: E402
 from ui_thread import UIDispatcher  # noqa: E402
 
-VERSAO = "7.8"
-EXTS_VIDEO = (".mp4", ".mov", ".avi", ".mkv", ".mts", ".m4v", ".webm")
+VERSAO = "7.9.1"
+from ffmpeg_utils import EXTS_VIDEO  # noqa: E402  (fonte unica das extensoes)
+import motor_local  # noqa: E402  (v7.9: motor de IA local, Ollama)
 
 # ============================================================
 # ENUMS PROFISSIONAIS
@@ -394,8 +396,11 @@ class ConfigManager:
 
     def onde_esta_chave(self, provedor: str) -> str:
         kr = self._keyring()
-        if kr and kr.get_password(self.SERVICO_KEYRING, provedor):
-            return "cofre do sistema"
+        try:   # v7.8.1: cofre bloqueado/sem D-Bus nao pode derrubar a tela (excecao no meio do salvar)
+            if kr and kr.get_password(self.SERVICO_KEYRING, provedor):
+                return "cofre do sistema"
+        except Exception:  # noqa: BLE001
+            pass
         if self.config.get("api_keys", {}).get(provedor):
             return f"arquivo {self.config_file} (permissao 600)"
         return ""
@@ -436,13 +441,73 @@ class ConfigManager:
 # CLAUDE AI ENGINE - A INTELIGENCIA DO APP
 # ============================================================
 
+def traduzir_erro_api(status: int, texto: str) -> str:
+    """v7.9: erros comuns da API do Claude em portugues, com o que fazer.
+    O texto original continua no final (para suporte)."""
+    baixo = (texto or "").lower()
+    if "credit balance" in baixo:
+        dica = ("Sua conta da API da Anthropic esta sem creditos.\n"
+                "Compre creditos em console.anthropic.com > Settings > Billing\n"
+                "ou use o motor GRATUITO local: aba IA > Motor > Ollama (local).")
+    elif status in (401, 403):
+        dica = "Chave da API recusada (invalida ou revogada). Gere outra em console.anthropic.com > API Keys."
+    elif status == 429:
+        dica = "Limite de uso da API atingido. Aguarde alguns minutos ou use o motor Ollama (local)."
+    elif status in (500, 502, 503, 529):
+        dica = "A API do Claude esta instavel/sobrecarregada. Tente de novo em instantes."
+    elif status == 404 and "model" in baixo:
+        dica = "Modelo nao encontrado. Confira o nome no campo Modelo (ex.: claude-haiku-4-5-20251001)."
+    else:
+        dica = "Erro da API do Claude."
+    return f"{dica}\n\n(Detalhe tecnico {status}: {(texto or '')[:300]})"
+
+
 class ClaudeEngine:
-    """Gera roteiros, titulos e textos via API do Claude (Anthropic)."""
+    """Gera roteiros, titulos e textos via IA.
+
+    v7.9: o nome ficou (todo o app usa self.claude), mas agora ha DOIS motores:
+      - "claude": API da Anthropic (pago por uso, melhor qualidade) - PADRAO;
+      - "ollama": modelo aberto rodando no proprio computador (gratis, offline).
+    Config: motor_ia, claude_model, ollama_model, ollama_url."""
+
+    MOTORES = ("claude", "ollama")
+    MODELO_CLAUDE_PADRAO = "claude-haiku-4-5-20251001"
 
     def __init__(self, config: ConfigManager, log_callback: Callable):
         self.config = config
         self.log = log_callback
         self.url = "https://api.anthropic.com/v1/messages"
+        self._progresso: Dict[int, Callable[[str], None]] = {}
+
+    def definir_progresso(self, callback: Optional[Callable[[str], None]]):
+        """v7.9.1: texto parcial do motor local, POR THREAD (a aba IA ve o texto
+        surgindo; o Diretor, em outra thread, nao recebe esse callback)."""
+        if callback is None:
+            self._progresso.pop(threading.get_ident(), None)
+        else:
+            self._progresso[threading.get_ident()] = callback
+
+    # ---- motor ativo (v7.9)
+    def motor(self) -> str:
+        m = self.config.get("motor_ia", "claude")
+        return m if m in self.MOTORES else "claude"
+
+    def definir_motor(self, motor: str):
+        if motor not in self.MOTORES:
+            raise ValueError(f"Motor desconhecido: {motor}")
+        self.config.set("motor_ia", motor)
+        self.log(f"IA: motor ativo = {self.nome_motor()}")
+
+    def nome_motor(self) -> str:
+        return "Claude (API)" if self.motor() == "claude" else "Ollama (local)"
+
+    def local(self) -> "motor_local.OllamaCliente":
+        return motor_local.OllamaCliente(self.config.get("ollama_url", motor_local.URL_PADRAO), self.log)
+
+    def pronto(self) -> bool:
+        """Ha motor configurado? (Claude: chave salva; Ollama: escolhido - o servidor e
+        conferido na chamada, para nao travar a tela com rede aqui.)"""
+        return self.motor() == "ollama" or self.tem_chave()
 
     def tem_chave(self) -> bool:
         return bool(self.config.get_api_key("claude"))
@@ -451,16 +516,49 @@ class ClaudeEngine:
         self.config.set_api_key("claude", chave.strip())
 
     def modelo(self) -> str:
-        return self.config.get("claude_model", "claude-haiku-4-5-20251001")
+        if self.motor() == "ollama":
+            return self.config.get("ollama_model", motor_local.MODELO_PADRAO)
+        return self.config.get("claude_model", self.MODELO_CLAUDE_PADRAO)
+
+    def definir_modelo(self, modelo: str):
+        modelo = (modelo or "").strip()
+        if modelo:
+            self.config.set("ollama_model" if self.motor() == "ollama" else "claude_model", modelo)
+
+    def testar_motor(self) -> Tuple[bool, str]:
+        if self.motor() == "ollama":
+            return self.local().testar(self.modelo())
+        return self.testar_chave()
 
     def gerar(self, prompt: str, system: str = "", max_tokens: int = 2000) -> str:
         return self.mensagem(prompt, system=system, max_tokens=max_tokens)
+
+    def testar_chave(self, chave: str = "") -> Tuple[bool, str]:
+        """v7.8.1: confere a chave com a API (GET /v1/models: nao gera tokens, sem custo)."""
+        if requests is None:
+            return False, "Pacote 'requests' nao instalado."
+        chave = chave or self.config.get_api_key("claude")
+        if not chave:
+            return False, "Nenhuma chave salva."
+        try:
+            r = requests.get("https://api.anthropic.com/v1/models",
+                             headers={"x-api-key": chave, "anthropic-version": "2023-06-01"}, timeout=20)
+        except Exception as e:  # noqa: BLE001
+            return False, f"Sem conexao com a API: {e}"
+        if r.status_code == 200:
+            return True, "Chave valida."
+        if r.status_code in (401, 403):
+            return False, "Chave recusada pela Anthropic (invalida, revogada ou sem permissao)."
+        return False, f"Resposta inesperada da API ({r.status_code}): {r.text[:200]}"
 
     def mensagem(self, conteudo: Union[str, List[Dict]], system: str = "", max_tokens: int = 2000,
                  timeout: float = 180) -> str:
         """v7.8: como gerar(), mas aceita lista de blocos (texto e imagens base64)
         para a visao do Diretor/Revisor IA. Bloco de imagem:
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": ...}}"""
+        if self.motor() == "ollama":
+            return self.local().chat(conteudo, self.modelo(), system=system, max_tokens=max_tokens,
+                                     ao_parcial=self._progresso.get(threading.get_ident()))
         if requests is None:
             raise RuntimeError("Pacote 'requests' nao instalado. Rode: pip install requests")
         chave = self.config.get_api_key("claude")
@@ -477,7 +575,7 @@ class ClaudeEngine:
         except Exception as e:  # noqa: BLE001 - rede/timeout/DNS
             raise RuntimeError(f"Falha de conexao com a API: {e}") from e
         if resp.status_code != 200:
-            raise RuntimeError(f"Erro da API ({resp.status_code}): {resp.text[:300]}")
+            raise RuntimeError(traduzir_erro_api(resp.status_code, resp.text))
         dados = resp.json()
         partes = [b.get("text", "") for b in dados.get("content", []) if b.get("type") == "text"]
         return "".join(partes).strip()
@@ -1542,20 +1640,55 @@ class VideoBuilderProV7:
     def criar_aba_ia(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text="  IA  ")
-        ttk.Label(frame, text="Assistente IA (Claude)", font=("Helvetica", 16, "bold")).pack(pady=10)
+        ttk.Label(frame, text="Assistente IA", font=("Helvetica", 16, "bold")).pack(pady=10)
+
+        # v7.9: escolha do motor. Claude continua o padrao (nada muda para quem ja usa);
+        # Ollama roda no proprio computador, gratis e sem internet.
+        motor_frame = ttk.LabelFrame(frame, text="Motor de IA", padding=10)
+        motor_frame.pack(fill=tk.X, padx=20, pady=5)
+        self.motor_var = tk.StringVar(value=self.claude.motor())
+        ttk.Radiobutton(motor_frame, text="Claude (API, pago por uso)", variable=self.motor_var,
+                        value="claude", command=self._mudar_motor).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(motor_frame, text="Ollama (local, gratuito)", variable=self.motor_var,
+                        value="ollama", command=self._mudar_motor).pack(side=tk.LEFT, padx=5)
+        ttk.Label(motor_frame, text="Modelo local:").pack(side=tk.LEFT, padx=(15, 5))
+        self.ollama_modelo_var = tk.StringVar(value=self.config.get("ollama_model", motor_local.MODELO_PADRAO))
+        self.ollama_combo = ttk.Combobox(motor_frame, textvariable=self.ollama_modelo_var, width=22,
+                                         values=[m for _, m, _ in motor_local.SUGESTOES])
+        self.ollama_combo.pack(side=tk.LEFT)
+        self.ollama_combo.bind("<<ComboboxSelected>>", self._salvar_modelo_ollama)
+        self.ollama_combo.bind("<FocusOut>", self._salvar_modelo_ollama, add="+")
+        self.ollama_combo.bind("<Return>", self._salvar_modelo_ollama)
+        ttk.Button(motor_frame, text="Atualizar lista", command=self.atualizar_modelos_ollama).pack(side=tk.LEFT, padx=5)
+        ttk.Button(motor_frame, text="Testar motor", command=self.testar_motor_ia).pack(side=tk.LEFT, padx=5)
+        self.motor_status = ttk.Label(frame, text="", justify=tk.LEFT)
+        self.motor_status.pack(anchor=tk.W, padx=24)
+        self.ao_mudar_motor: List[Callable] = []   # outras abas (Diretor IA) se atualizam
+        self._atualizar_status_motor()
 
         key_frame = ttk.LabelFrame(frame, text="Chave da API (console.anthropic.com)", padding=10)
         key_frame.pack(fill=tk.X, padx=20, pady=5)
-        # v7.7: a chave salva NAO e mais carregada no campo (antes ficava na
-        # memoria do widget, copiavel). Deixe em branco para manter a atual.
+        # v7.7: a chave salva NAO e carregada no campo (ficaria na memoria do widget).
+        # v7.8.1: em vez do campo vazio (parecia que "a chave sumiu"), o campo mostra
+        # uma MASCARA (nao e a chave) e o rotulo verde diz que esta salva e o final dela.
         self.api_key_entry = ttk.Entry(key_frame, width=50, show="*")
         self.api_key_entry.pack(side=tk.LEFT, padx=5)
+        self.api_key_entry.bind("<FocusIn>", self._chave_focus_in)
+        self.api_key_entry.bind("<Return>", lambda e: self.salvar_chave_ia())
+        # v7.8.1: colar a chave e trocar de aba SEM clicar em Salvar perdia a chave
+        # (o relato "quando mudo a aba ela some"). Agora sair do campo ou trocar de
+        # aba salva automaticamente uma chave sk-ant- recem-colada.
+        self.api_key_entry.bind("<FocusOut>", self._chave_auto_salvar, add="+")
+        nb.bind("<<NotebookTabChanged>>", self._chave_auto_salvar, add="+")
         ttk.Button(key_frame, text="Salvar chave", command=self.salvar_chave_ia).pack(side=tk.LEFT, padx=5)
+        ttk.Button(key_frame, text="Testar chave", command=self.testar_chave_ia).pack(side=tk.LEFT, padx=5)
         ttk.Label(key_frame, text="Modelo:").pack(side=tk.LEFT, padx=(15, 5))
-        self.modelo_var = tk.StringVar(value=self.claude.modelo())
+        # Campo do modelo do CLAUDE (o modelo local fica no quadro "Motor de IA").
+        self.modelo_var = tk.StringVar(value=self.config.get("claude_model", self.claude.MODELO_CLAUDE_PADRAO))
         ttk.Entry(key_frame, textvariable=self.modelo_var, width=26).pack(side=tk.LEFT)
-        self.chave_status = ttk.Label(frame, text=self._texto_status_chave())
+        self.chave_status = ttk.Label(frame, text="")
         self.chave_status.pack(anchor=tk.W, padx=24)
+        self._atualizar_status_chave()
 
         tema_frame = ttk.LabelFrame(frame, text="Tema / Texto", padding=10)
         tema_frame.pack(fill=tk.X, padx=20, pady=5)
@@ -1572,38 +1705,151 @@ class VideoBuilderProV7:
         self.ia_result.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         ttk.Button(frame, text="Copiar resultado", command=self.copiar_ia).pack(pady=5)
 
+    MASCARA_CHAVE = "*" * 24   # exibido no campo quando ha chave salva (nao e a chave)
+
     def _texto_status_chave(self) -> str:
         onde = self.config.onde_esta_chave("claude")
-        return f"Chave salva em: {onde}" if onde else "Nenhuma chave salva."
+        if not onde:
+            return "Nenhuma chave salva. Cole a chave (sk-ant-...) e clique em Salvar (ou Enter)."
+        final = self.config.get_api_key("claude")[-4:]
+        return f"\u2714 Chave salva (termina em ...{final}) - {onde}. Para trocar, clique no campo e cole a nova."
+
+    def _atualizar_status_chave(self):
+        salva = bool(self.config.onde_esta_chave("claude"))
+        self.chave_status.config(text=self._texto_status_chave(), foreground="green" if salva else "orange")
+        self.api_key_entry.delete(0, tk.END)
+        if salva:
+            self.api_key_entry.insert(0, self.MASCARA_CHAVE)
+
+    def _chave_focus_in(self, _evento=None):
+        if self.api_key_entry.get() == self.MASCARA_CHAVE:
+            self.api_key_entry.delete(0, tk.END)
+
+    def _chave_auto_salvar(self, _evento=None):
+        """Salva sem perguntar uma chave sk-ant- colada e nao salva; restaura a mascara."""
+        digitada = self.api_key_entry.get().strip()
+        if digitada.startswith("sk-ant-") and digitada != self.config.get_api_key("claude"):
+            self.claude.salvar_chave(digitada)
+            self._atualizar_status_chave()
+            return
+        if not digitada and self.claude.tem_chave():
+            self._atualizar_status_chave()
+
+    # ---- v7.9: motor de IA (Claude | Ollama)
+    def _texto_status_motor(self) -> str:
+        if self.claude.motor() == "claude":
+            return "Motor: Claude (API). Precisa de chave com creditos (abaixo)."
+        ram = motor_local.ram_total_gb()
+        sugerido, desc = motor_local.sugerir_modelo(ram)
+        ram_txt = f"{ram:.0f} GB de RAM: sugerido {sugerido} ({desc}). " if ram else ""
+        return (f"Motor: Ollama (local) - modelo {self.claude.modelo()}. {ram_txt}"
+                "Clique em 'Testar motor'.\n" + motor_local.INSTRUCOES_INSTALACAO)
+
+    def _atualizar_status_motor(self):
+        self.motor_status.config(text=self._texto_status_motor(),
+                                 foreground="green" if self.claude.motor() == "claude" else "blue")
+
+    def _mudar_motor(self):
+        self.claude.definir_motor(self.motor_var.get())
+        self._salvar_modelo_ollama()
+        self._atualizar_status_motor()
+        for cb in list(getattr(self, "ao_mudar_motor", [])):
+            try:
+                cb()
+            except Exception as e:  # noqa: BLE001 - uma aba com erro nao trava a troca
+                self.log(f"Aviso ao atualizar aba apos trocar motor: {e}")
+
+    def _salvar_modelo_ollama(self, _evento=None):
+        modelo = self.ollama_modelo_var.get().strip()
+        if modelo and modelo != self.config.get("ollama_model", motor_local.MODELO_PADRAO):
+            self.config.set("ollama_model", modelo)
+            self._atualizar_status_motor()
+
+    def atualizar_modelos_ollama(self):
+        def tarefa():
+            try:
+                modelos = self.claude.local().modelos()
+            except RuntimeError as e:
+                self.ui.chamar(lambda: self.motor_status.config(text=str(e), foreground="red"))
+                return
+
+            def fim():
+                sugestoes = [m for _, m, _ in motor_local.SUGESTOES if m not in modelos]
+                self.ollama_combo.config(values=modelos + sugestoes)
+                txt = (f"Modelos baixados: {', '.join(modelos)}" if modelos
+                       else f"Nenhum modelo baixado. Rode: ollama pull {self.ollama_modelo_var.get()}")
+                self.motor_status.config(text=txt, foreground="green" if modelos else "orange")
+            self.ui.chamar(fim)
+        self.ui.em_segundo_plano(tarefa, nome="ollama_modelos")
+
+    def testar_motor_ia(self):
+        self._salvar_modelo_ollama()
+        self.motor_status.config(text=f"Testando {self.claude.nome_motor()}...", foreground="gray")
+
+        def tarefa():
+            ok, msg = self.claude.testar_motor()
+
+            def fim():
+                self.motor_status.config(text=("\u2714 " if ok else "\u2716 ") + msg,
+                                         foreground="green" if ok else "red")
+                (messagebox.showinfo if ok else messagebox.showerror)("Motor de IA", msg)
+            self.ui.chamar(fim)
+        self.ui.em_segundo_plano(tarefa, nome="testar_motor")
+
+    def testar_chave_ia(self):
+        digitada = self.api_key_entry.get().strip()
+        chave = "" if digitada in ("", self.MASCARA_CHAVE) else digitada
+        self.chave_status.config(text="Testando a chave com a API...", foreground="gray")
+
+        def tarefa():
+            ok, msg = self.claude.testar_chave(chave)
+
+            def fim():
+                self.chave_status.config(text=("\u2714 " if ok else "\u2716 ") + msg,
+                                         foreground="green" if ok else "red")
+                (messagebox.showinfo if ok else messagebox.showerror)("Chave da API", msg)
+            self.ui.chamar(fim)
+        self.ui.em_segundo_plano(tarefa, nome="testar_chave")
 
     def salvar_chave_ia(self):
         chave = self.api_key_entry.get().strip()
         modelo = self.modelo_var.get().strip()
         if modelo:
             self.config.set("claude_model", modelo)
-        if not chave:
+        if not chave or chave == self.MASCARA_CHAVE:
             if self.claude.tem_chave():
+                self._atualizar_status_chave()
                 messagebox.showinfo("IA", "Modelo salvo. Chave atual mantida.")
             else:
                 messagebox.showwarning("Aviso", "Cole a chave da API primeiro.")
             return
+        if not chave.startswith("sk-ant-"):
+            if not messagebox.askyesno("Chave da API", "A chave nao comeca com 'sk-ant-'. Salvar mesmo assim?"):
+                return
         self.claude.salvar_chave(chave)
-        self.api_key_entry.delete(0, tk.END)
-        self.chave_status.config(text=self._texto_status_chave())
-        messagebox.showinfo("IA", f"Chave salva com sucesso ({self.config.onde_esta_chave('claude')}).")
+        self._atualizar_status_chave()
+        if self.config.get_api_key("claude") != chave:   # confere que foi gravada de verdade
+            messagebox.showerror("IA", "Nao foi possivel gravar a chave. Veja Ferramentas > Abrir pasta de logs.")
+            return
+        messagebox.showinfo("IA", f"Chave salva (termina em ...{chave[-4:]}) - "
+                                  f"{self.config.onde_esta_chave('claude')}.\nUse 'Testar chave' para conferir.")
 
     def gerar_ia(self, tipo: str):
         tema = self.ia_prompt.get("1.0", tk.END).strip()
         if not tema:
             messagebox.showwarning("Aviso", "Escreva o tema ou texto primeiro.")
             return
-        if not self.claude.tem_chave():
-            messagebox.showwarning("Aviso", "Salve a chave da API primeiro.")
+        if not self.claude.pronto():
+            messagebox.showwarning("Aviso", "Salve a chave da API do Claude ou escolha o motor "
+                                            "Ollama (local, gratuito) no quadro 'Motor de IA'.")
             return
         if self.modelo_var.get().strip():
             self.config.set("claude_model", self.modelo_var.get().strip())
+        self._salvar_modelo_ollama()
         self.ia_result.delete(1.0, tk.END)
-        self.ia_result.insert(tk.END, "Gerando com Claude... aguarde.\n")
+        espera = " Modelo local: a 1a resposta pode levar 1-2 min." if self.claude.motor() == "ollama" else ""
+        self.ia_result.insert(tk.END, f"Gerando com {self.claude.nome_motor()} ({self.claude.modelo()})... "
+                                      f"aguarde.{espera}\n")
         funcoes = {"roteiro": self.claude.roteiro, "titulos": self.claude.titulos,
                    "descricao": self.claude.descricao_youtube, "capitulos": self.claude.capitulos,
                    "hashtags": self.claude.hashtags, "melhorar": self.claude.melhorar_texto}
@@ -1613,7 +1859,18 @@ class VideoBuilderProV7:
             self.ia_result.insert(tk.END, texto)
 
         def tarefa():
-            texto = funcoes.get(tipo, self.claude.melhorar_texto)(tema)
+            ultimo = [0.0]
+
+            def parcial(txt):            # v7.9.1: texto surgindo (no maximo ~3x por segundo)
+                agora = time.monotonic()
+                if agora - ultimo[0] >= 0.3:
+                    ultimo[0] = agora
+                    self.ui.chamar(mostrar, txt + " ...")
+            self.claude.definir_progresso(parcial)
+            try:
+                texto = funcoes.get(tipo, self.claude.melhorar_texto)(tema)
+            finally:
+                self.claude.definir_progresso(None)
             self.ui.chamar(mostrar, texto)
             self.log("IA: conteudo gerado com sucesso.")
 
@@ -1700,12 +1957,18 @@ class VideoBuilderProV7:
     # ============================================================
 
     def _adicionar_clip(self, arquivo: Path, atualizar: bool = True) -> bool:
+        """Adiciona um video a timeline. Em caso de falha, o motivo fica em
+        self.ultimo_erro_importacao (v7.8.1: antes ia so para o log da aba Render
+        e a importacao parecia "nao fazer nada")."""
+        self.ultimo_erro_importacao = ""
         try:
             info = info_midia(arquivo)
         except FFmpegErro as e:
+            self.ultimo_erro_importacao = f"ffprobe nao conseguiu ler o arquivo: {e}"
             self.log(f"[ERRO] {arquivo.name}: {e}")
             return False
         if not info["tem_video"]:
+            self.ultimo_erro_importacao = "o arquivo nao tem trilha de video"
             self.log(f"[AVISO] {arquivo.name} ignorado: sem video.")
             return False
         self.clips.append(ClipTimeline(arquivo=arquivo, inicio=0.0, fim=info["duracao"],
@@ -1742,19 +2005,31 @@ class VideoBuilderProV7:
             x += w
         cv.create_text(10, 12, text=f"Duracao total: {total:.2f}s", anchor=tk.W, fill="#cccccc")
 
-    def importar_midia(self):
-        files = filedialog.askopenfilenames(filetypes=[("Videos", " ".join("*" + e for e in EXTS_VIDEO))])
-        for f in files:
-            self._adicionar_clip(Path(f), atualizar=False)
+    def importar_midia(self, arquivos: Optional[List[str]] = None):
+        files = arquivos if arquivos is not None else filedialog.askopenfilenames(filetypes=tipos_video())
+        self._importar(list(files))
+
+    def _importar(self, arquivos: List):
+        falhas = []
+        for f in arquivos:
+            if not self._adicionar_clip(Path(f), atualizar=False):
+                falhas.append(f"{Path(f).name}: {self.ultimo_erro_importacao}")
         self._atualizar_listas()
+        if arquivos:
+            self.log(f"Importacao: {len(arquivos) - len(falhas)} de {len(arquivos)} arquivo(s) adicionados.")
+        if falhas:
+            messagebox.showerror("Importar midia",
+                                 f"{len(falhas)} arquivo(s) nao foram importados:\n\n" + "\n".join(falhas[:10]) +
+                                 "\n\nDetalhes: Ferramentas > Abrir pasta de logs.")
 
     def carregar_pasta(self):
         pasta = filedialog.askdirectory()
         if pasta:
-            for f in sorted(Path(pasta).iterdir()):
-                if f.suffix.lower() in EXTS_VIDEO:
-                    self._adicionar_clip(f, atualizar=False)
-            self._atualizar_listas()
+            arquivos = [f for f in sorted(Path(pasta).iterdir()) if f.suffix.lower() in EXTS_VIDEO]
+            if not arquivos:
+                messagebox.showwarning("Importar pasta", f"Nenhum video ({', '.join(EXTS_VIDEO)}) em:\n{pasta}")
+                return
+            self._importar(arquivos)
 
     def criar_proxies(self):
         if not self.clips:
@@ -1949,7 +2224,7 @@ class VideoBuilderProV7:
         self.log(f"Padrao de audio: {padrao} ({alvo} LUFS, true peak {tp} dBTP)")
 
     def escolher_trilha(self):
-        arq = filedialog.askopenfilename(filetypes=[("Audio", "*.mp3 *.wav *.m4a *.flac *.aac *.ogg")])
+        arq = filedialog.askopenfilename(filetypes=tipos_midia())
         if arq:
             self.trilha = MusicTrack(Path(arq))
             self.trilha_label.config(text=f"Trilha: {Path(arq).name}")
@@ -2150,7 +2425,7 @@ class VideoBuilderProV7:
         self.qc_result.insert(tk.END, report.texto())
 
     def analisar_qc(self, arquivo: Optional[str] = None):
-        arquivo = arquivo or filedialog.askopenfilename(filetypes=[("Videos", " ".join("*" + e for e in EXTS_VIDEO))])
+        arquivo = arquivo or filedialog.askopenfilename(filetypes=tipos_video())
         if not arquivo:
             return
         self.qc_result.delete(1.0, tk.END)

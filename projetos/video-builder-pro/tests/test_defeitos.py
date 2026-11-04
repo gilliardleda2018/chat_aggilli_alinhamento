@@ -575,10 +575,13 @@ def test_D43_render_pela_ui_aplica_escolhas(midia, tmp_path, log):
 
 
 def test_D44_chave_nao_volta_para_o_campo(log):
+    """A chave real nunca e carregada no campo. v7.8.1: o campo mostra uma MASCARA
+    (antes ficava vazio e o usuario achava que a chave tinha sumido)."""
     base = _base()
     base.ConfigManager().set_api_key("claude", "sk-secreta")
     app = base.VideoBuilderProV7(fake_tk.Tk())
-    assert app.api_key_entry.get() == ""
+    assert "sk-secreta" not in app.api_key_entry.get()
+    assert app.api_key_entry.get() == app.MASCARA_CHAVE
 
 
 def test_D45_patch_detectar_cenas_sem_crash(midia, log):

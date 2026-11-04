@@ -40,6 +40,87 @@ class FFmpegErro(RuntimeError):
         super().__init__(f"{Path(cmd[0]).name} falhou (codigo {returncode}): " + " | ".join(resumo))
 
 
+# ------------------------------------------------------------------ pastas do app
+def pasta_app() -> Path:
+    """Raiz do app, em codigo-fonte ou empacotado (PyInstaller).
+
+    Fonte:        .../video-builder-pro/          (modules/ fica aqui dentro)
+    Empacotado:   sys._MEIPASS (pasta _internal do PyInstaller onedir)
+    v7.8: antes cada modulo usava Path(__file__).parent.parent, que aponta
+    para fora do pacote quando o app esta instalado (estilos/luts/bin sumiam).
+    """
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).resolve().parent.parent
+
+
+def preparar_ffmpeg_embutido() -> Optional[Path]:
+    """Se o instalador trouxe FFmpeg em <app>/bin, coloca-o na frente do PATH.
+    Retorna a pasta usada (ou None se nao houver binarios embutidos)."""
+    pasta = pasta_app() / "bin"
+    nome = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    if (pasta / nome).is_file():
+        caminhos = os.environ.get("PATH", "").split(os.pathsep)
+        if str(pasta) not in caminhos:
+            os.environ["PATH"] = os.pathsep.join([str(pasta), *caminhos])
+        return pasta
+    return None
+
+
+def ambiente_sem_pacote(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Ambiente para programas EXTERNOS (ffmpeg, ffprobe, xdg-open...).
+
+    v7.8.1: no Linux, o PyInstaller poe a pasta interna do pacote em
+    LD_LIBRARY_PATH (e guarda o valor original em LD_LIBRARY_PATH_ORIG). Os
+    filhos herdavam isso e o ffprobe do sistema carregava a libstdc++ antiga
+    do pacote: "GLIBCXX_3.4.32 not found" -> nenhum video era importado.
+    Aqui o valor original e restaurado so para os processos filhos.
+    """
+    env = dict(os.environ if env is None else env)
+    if getattr(sys, "frozen", False) and os.name != "nt":
+        for var in ("LD_LIBRARY_PATH",):
+            original = env.pop(var + "_ORIG", None)
+            if original:
+                env[var] = original
+            else:
+                env.pop(var, None)
+    return env
+
+
+def isolar_subprocessos() -> bool:
+    """No app empacotado (Linux), faz TODO subprocess usar ambiente_sem_pacote().
+    Cobre tambem bibliotecas de terceiros que chamam o ffmpeg (ex.: yt-dlp).
+    Sem efeito ao rodar pelo codigo-fonte ou no Windows. Idempotente."""
+    if not getattr(sys, "frozen", False) or os.name == "nt" or getattr(subprocess.Popen, "_vbp_isolado", False):
+        return False
+    original = subprocess.Popen.__init__
+
+    def __init__(self, *args, **kwargs):
+        kwargs["env"] = ambiente_sem_pacote(kwargs.get("env"))
+        original(self, *args, **kwargs)
+    subprocess.Popen.__init__ = __init__
+    subprocess.Popen._vbp_isolado = True
+    return True
+
+
+EXTS_VIDEO = (".mp4", ".mov", ".avi", ".mkv", ".mts", ".m4v", ".webm")
+EXTS_AUDIO = (".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg")
+
+
+def padroes_arquivo(exts) -> str:
+    """Padroes para filedialog com minusculas E maiusculas: no Linux o dialogo
+    do Tk diferencia ("*.mp4" nao mostrava "VIDEO.MP4" de celulares/cameras)."""
+    return " ".join(f"*{e.lower()} *{e.upper()}" for e in exts)
+
+
+def tipos_video():
+    return [("Videos", padroes_arquivo(EXTS_VIDEO)), ("Todos os arquivos", "*")]
+
+
+def tipos_midia():
+    return [("Audio/Video", padroes_arquivo(EXTS_VIDEO + EXTS_AUDIO)), ("Todos os arquivos", "*")]
+
+
 # ------------------------------------------------------------------ logging
 _LOGGER_PRONTO = False
 
