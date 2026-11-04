@@ -38,8 +38,8 @@ SUGESTOES = (
 MODELOS_VISAO = ("llava", "qwen2.5vl", "llama3.2-vision", "gemma3", "minicpm-v", "moondream")
 
 INSTRUCOES_INSTALACAO = (
-    "1. Instale o Ollama (uma vez), como root:\n"
-    "   su -c \"curl -fsSL https://ollama.com/install.sh | sh\"\n"
+    "1. Instale o Ollama (uma vez), como root (o hifen em 'su -' e necessario no Debian):\n"
+    "   su - -c \"curl -fsSL https://ollama.com/install.sh | sh\"\n"
     "2. Baixe um modelo (como seu usuario normal):\n"
     f"   ollama pull {MODELO_PADRAO}\n"
     "3. Volte aqui e clique em 'Testar motor'.\n"

@@ -21,6 +21,7 @@ desde fev/2026, por isso nao foi feito.)
 | Diretor IA mostra o motor ativo e se atualiza na troca (`app.ao_mudar_motor`) | Evita a duvida "qual IA esta editando?". | L11 |
 | Erros da API do Claude **traduzidos** (sem credito, chave recusada, 429, sobrecarga, modelo inexistente) com o detalhe tecnico no final | O erro em ingles "credit balance is too low" foi o que o usuario viu; agora diz o que fazer e sugere o motor local. | L12 |
 | CI: job `ollama-real` instala o Ollama oficial, baixa `qwen2.5:0.5b` e gera titulos pelo motor do app (sobe `ollama serve` na mao: o runner nao tem systemd; a 1a execucao falhou exatamente por isso, e a instrucao do app ganhou a dica `ollama serve`) | Os testes L usam um servidor que imita o Ollama; este job prova a integracao com o servidor real. | CI |
+| Instrucao de instalacao usa `su - -c` (com hifen) | No 1o teste do usuario, `su -c` nao trouxe `/usr/sbin` para o PATH (Debian) e o instalador do Ollama falhou em `useradd: not found`, sem criar o usuario nem o servico. | L05 |
 | `motor_local` nos `hiddenimports` do PyInstaller; `VERSAO = "7.9"` | O modulo entra no .deb/.exe; pre-release de teste `teste-deb-7.9`. | CI |
 
 ### Garantia de "sem regressao"
