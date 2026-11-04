@@ -19,6 +19,7 @@ sistema (o servidor e local; um http_proxy configurado quebraria a conexao).
 """
 
 import json
+import socket
 import urllib.error
 import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -94,14 +95,27 @@ class OllamaCliente:
         self._abrir = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
 
     # --------------------------------------------------------------- HTTP
-    def _req(self, caminho: str, corpo: Optional[Dict] = None, timeout: float = 10) -> Dict:
+    def _erro_conexao(self, e: BaseException, timeout: float) -> RuntimeError:
+        """v7.9.1: "timed out" NAO e "nao esta rodando". Desligado = conexao recusada
+        na hora; tempo esgotado = o Ollama esta no ar mas lento (modelo grande na CPU)."""
+        motivo = getattr(e, "reason", e)
+        if isinstance(motivo, (TimeoutError, socket.timeout)) or "timed out" in str(motivo):
+            return RuntimeError(
+                f"O Ollama esta rodando, mas ficou {timeout:.0f} s sem responder.\n"
+                "Normal na 1a vez (o modelo esta sendo carregado na memoria) ou com modelo "
+                "grande em computador sem placa de video.\n"
+                "Tente de novo; se repetir, use um modelo menor no quadro 'Motor de IA' "
+                "(ex.: llama3.2:3b - rode antes: ollama pull llama3.2:3b).")
+        return RuntimeError(
+            f"Ollama nao esta rodando em {self.url} ({motivo}).\n\n" + INSTRUCOES_INSTALACAO)
+
+    def _abrir_req(self, caminho: str, corpo: Optional[Dict], timeout: float):
         dados = None if corpo is None else json.dumps(corpo).encode("utf-8")
         req = urllib.request.Request(self.url + caminho, data=dados,
                                      headers={"Content-Type": "application/json"},
                                      method="GET" if corpo is None else "POST")
         try:
-            with self._abrir(req, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8") or "{}")
+            return self._abrir(req, timeout=timeout)
         except urllib.error.HTTPError as e:
             texto = e.read().decode("utf-8", "replace")
             try:
@@ -110,8 +124,15 @@ class OllamaCliente:
                 pass
             raise RuntimeError(f"Ollama respondeu erro {e.code}: {texto[:300]}") from e
         except (urllib.error.URLError, OSError) as e:
-            raise RuntimeError(
-                f"Ollama nao esta rodando em {self.url} ({getattr(e, 'reason', e)}).\n\n" + INSTRUCOES_INSTALACAO) from e
+            raise self._erro_conexao(e, timeout) from e
+
+    def _req(self, caminho: str, corpo: Optional[Dict] = None, timeout: float = 10) -> Dict:
+        r = self._abrir_req(caminho, corpo, timeout)
+        try:
+            with r:
+                return json.loads(r.read().decode("utf-8") or "{}")
+        except OSError as e:
+            raise self._erro_conexao(e, timeout) from e
 
     # --------------------------------------------------------------- API
     def modelos(self) -> List[str]:
@@ -133,7 +154,12 @@ class OllamaCliente:
         return True, f"Ollama pronto: {modelo} - {visao}."
 
     def chat(self, conteudo: Union[str, List[Dict]], modelo: str, system: str = "",
-             max_tokens: int = 2000, timeout: float = 600) -> str:
+             max_tokens: int = 2000, timeout: float = 300,
+             ao_parcial: Optional[Callable[[str], None]] = None) -> str:
+        """v7.9.1: resposta em STREAMING. O timeout vale por trecho recebido (pausa
+        maxima sem nenhuma palavra, inclui carregar o modelo), nao para a resposta
+        inteira: um roteiro longo na CPU pode levar varios minutos e nao estoura mais.
+        ao_parcial(texto_ate_agora) mostra o texto surgindo na tela."""
         texto, imagens = converter_conteudo(conteudo)
         if imagens and not tem_visao(modelo):
             self.log(f"Ollama: '{modelo}' nao tem visao; {len(imagens)} imagem(ns) ignorada(s).")
@@ -142,11 +168,31 @@ class OllamaCliente:
         if imagens:
             msg["images"] = imagens
         mensagens = ([{"role": "system", "content": system}] if system else []) + [msg]
-        corpo = {"model": modelo, "messages": mensagens, "stream": False,
+        corpo = {"model": modelo, "messages": mensagens, "stream": True,
                  "options": {"num_predict": int(max_tokens)}}
-        # Modelo local e mais lento que a API: timeout maior (1a chamada tambem carrega o modelo).
-        resp = self._req("/api/chat", corpo, timeout=timeout)
-        saida = ((resp.get("message") or {}).get("content") or "").strip()
+        partes: List[str] = []
+        r = self._abrir_req("/api/chat", corpo, timeout)
+        try:
+            with r:
+                for linha in r:                       # NDJSON: um objeto por linha
+                    linha = linha.strip()
+                    if not linha:
+                        continue
+                    d = json.loads(linha.decode("utf-8"))
+                    if d.get("error"):
+                        raise RuntimeError(f"Ollama: {d['error']}")
+                    pedaco = (d.get("message") or {}).get("content") or ""
+                    if pedaco:
+                        partes.append(pedaco)
+                        if ao_parcial:
+                            ao_parcial("".join(partes))
+                    if d.get("done"):
+                        break
+        except OSError as e:
+            if not partes:
+                raise self._erro_conexao(e, timeout) from e
+            self.log(f"Ollama: conexao interrompida ({e}); usando o texto recebido ate aqui.")
+        saida = "".join(partes).strip()
         if not saida:
             raise RuntimeError(f"Ollama devolveu resposta vazia (modelo {modelo}).")
         return saida

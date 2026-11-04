@@ -72,7 +72,9 @@ jobs:
           eng = base.ClaudeEngine(base.ConfigManager(), print)
           eng.definir_motor("ollama"); eng.definir_modelo("qwen2.5:0.5b")
           ok, msg = eng.testar_motor(); print(msg); assert ok, msg
+          parciais = []; eng.definir_progresso(parciais.append)     # v7.9.1: streaming real
           t = eng.titulos("cafe especial"); print(t); assert len(t) > 20
+          eng.definir_progresso(None); print("trechos recebidos:", len(parciais)); assert len(parciais) > 3
           print(eng.mensagem("Responda so com a palavra OK.", max_tokens=10))
           EOF
 

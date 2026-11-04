@@ -30,6 +30,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -62,7 +63,7 @@ from luts_manager import LUTManager  # noqa: E402
 from transitions_gl import GLTransition, GLTransitionsEngine  # noqa: E402
 from ui_thread import UIDispatcher  # noqa: E402
 
-VERSAO = "7.9"
+VERSAO = "7.9.1"
 from ffmpeg_utils import EXTS_VIDEO  # noqa: E402  (fonte unica das extensoes)
 import motor_local  # noqa: E402  (v7.9: motor de IA local, Ollama)
 
@@ -476,6 +477,15 @@ class ClaudeEngine:
         self.config = config
         self.log = log_callback
         self.url = "https://api.anthropic.com/v1/messages"
+        self._progresso: Dict[int, Callable[[str], None]] = {}
+
+    def definir_progresso(self, callback: Optional[Callable[[str], None]]):
+        """v7.9.1: texto parcial do motor local, POR THREAD (a aba IA ve o texto
+        surgindo; o Diretor, em outra thread, nao recebe esse callback)."""
+        if callback is None:
+            self._progresso.pop(threading.get_ident(), None)
+        else:
+            self._progresso[threading.get_ident()] = callback
 
     # ---- motor ativo (v7.9)
     def motor(self) -> str:
@@ -547,7 +557,8 @@ class ClaudeEngine:
         para a visao do Diretor/Revisor IA. Bloco de imagem:
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": ...}}"""
         if self.motor() == "ollama":
-            return self.local().chat(conteudo, self.modelo(), system=system, max_tokens=max_tokens)
+            return self.local().chat(conteudo, self.modelo(), system=system, max_tokens=max_tokens,
+                                     ao_parcial=self._progresso.get(threading.get_ident()))
         if requests is None:
             raise RuntimeError("Pacote 'requests' nao instalado. Rode: pip install requests")
         chave = self.config.get_api_key("claude")
@@ -1848,7 +1859,18 @@ class VideoBuilderProV7:
             self.ia_result.insert(tk.END, texto)
 
         def tarefa():
-            texto = funcoes.get(tipo, self.claude.melhorar_texto)(tema)
+            ultimo = [0.0]
+
+            def parcial(txt):            # v7.9.1: texto surgindo (no maximo ~3x por segundo)
+                agora = time.monotonic()
+                if agora - ultimo[0] >= 0.3:
+                    ultimo[0] = agora
+                    self.ui.chamar(mostrar, txt + " ...")
+            self.claude.definir_progresso(parcial)
+            try:
+                texto = funcoes.get(tipo, self.claude.melhorar_texto)(tema)
+            finally:
+                self.claude.definir_progresso(None)
             self.ui.chamar(mostrar, texto)
             self.log("IA: conteudo gerado com sucesso.")
 

@@ -1,5 +1,33 @@
 # Changelog - Video Builder Pro
 
+## [v7.9.1] - 2026-11-04 - Motor local: resposta em streaming e diagnostico correto de lentidao
+
+Relato do usuario no 1o uso do Ollama: "Erro: Ollama nao esta rodando em
+http://localhost:11434 (timed out)".
+
+### Diagnostico
+| Fato | Conclusao |
+|---|---|
+| A falha foi "timed out", nao "connection refused" | Com o Ollama desligado a conexao e recusada na hora. Tempo esgotado = servidor no ar, mas sem responder a tempo. A mensagem "nao esta rodando" estava **errada** (v7.9 tratava todo erro de rede igual). |
+| v7.9 pedia a resposta inteira de uma vez (`stream: false`) com limite de 600 s | Um 7b na CPU (sem placa de video) gera poucas palavras por segundo; um roteiro de ate 2500 tokens pode passar de 10 min e estourar o limite sem mostrar nada. |
+
+### Decisoes (e por que)
+| Decisao | Motivo | Teste |
+|---|---|---|
+| `chat()` em **streaming** (`stream: true`, NDJSON) | O limite de tempo passa a valer por **pausa** (300 s sem nenhuma palavra, inclui carregar o modelo), nao pela resposta inteira: textos longos na CPU nao estouram mais. | L13, L14, CI `ollama-real` |
+| Texto **surgindo na tela** na aba IA (no maximo ~3 atualizacoes/s) | O usuario ve que esta funcionando em vez de esperar minutos sem retorno. | L15 |
+| Callback de progresso **por thread** (`definir_progresso`) | O Diretor IA roda em outra thread e nao pode escrever na caixa da aba IA. Removido ao terminar (try/finally). | L15 |
+| Erros separados: tempo esgotado -> "esta rodando, mas ficou N s sem responder" + sugestao de modelo menor; recusada -> "nao esta rodando" + instrucoes | Cada mensagem leva a acao certa. | L14, L05 |
+| Conexao cai no meio da resposta -> usa o texto ja recebido (registrado no log) | Nao jogar fora minutos de geracao por uma queda no fim. | - |
+| Servidor de teste agora responde em streaming como o real (e em threads) | Os testes seguem o protocolo real. | L02-L15 |
+| `VERSAO = "7.9.1"` | Pre-release `teste-deb-7.9.1`. | CI |
+
+### Garantia de "sem regressao"
+| Suite | Antes | Depois |
+|---|---|---|
+| todas as anteriores | 127/127 | 127/127 (L02 ajustado: `stream` agora e `true`) |
+| novos L13-L15 | - | 3/3 |
+
 ## [v7.9] - 2026-11-04 - Motor de IA local e gratuito (Ollama), ao lado do Claude
 
 Branch `feat/instalador` (PR #3). Pedido do usuario: sem saldo na API da Anthropic,
