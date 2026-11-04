@@ -42,7 +42,8 @@ INSTRUCOES_INSTALACAO = (
     "   su -c \"curl -fsSL https://ollama.com/install.sh | sh\"\n"
     "2. Baixe um modelo (como seu usuario normal):\n"
     f"   ollama pull {MODELO_PADRAO}\n"
-    "3. Volte aqui e clique em 'Testar motor'."
+    "3. Volte aqui e clique em 'Testar motor'.\n"
+    "Se disser que o Ollama nao esta rodando: abra um terminal e rode  ollama serve"
 )
 
 

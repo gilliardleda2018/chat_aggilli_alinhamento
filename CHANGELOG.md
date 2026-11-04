@@ -20,7 +20,7 @@ desde fev/2026, por isso nao foi feito.)
 | Aba IA: quadro **"Motor de IA"** (Claude / Ollama, modelo local, "Atualizar lista", "Testar motor") com instrucoes de instalacao e **modelo sugerido pela RAM** | O usuario instala e configura sem sair do app. Limites de RAM ~1 GB abaixo do nominal (o Linux reporta 8 GB como ~7,6). | L09, L10, L05 |
 | Diretor IA mostra o motor ativo e se atualiza na troca (`app.ao_mudar_motor`) | Evita a duvida "qual IA esta editando?". | L11 |
 | Erros da API do Claude **traduzidos** (sem credito, chave recusada, 429, sobrecarga, modelo inexistente) com o detalhe tecnico no final | O erro em ingles "credit balance is too low" foi o que o usuario viu; agora diz o que fazer e sugere o motor local. | L12 |
-| CI: job `ollama-real` instala o Ollama oficial, baixa `qwen2.5:0.5b` e gera titulos pelo motor do app | Os testes L usam um servidor que imita o Ollama; este job prova a integracao com o servidor real. | CI |
+| CI: job `ollama-real` instala o Ollama oficial, baixa `qwen2.5:0.5b` e gera titulos pelo motor do app (sobe `ollama serve` na mao: o runner nao tem systemd; a 1a execucao falhou exatamente por isso, e a instrucao do app ganhou a dica `ollama serve`) | Os testes L usam um servidor que imita o Ollama; este job prova a integracao com o servidor real. | CI |
 | `motor_local` nos `hiddenimports` do PyInstaller; `VERSAO = "7.9"` | O modulo entra no .deb/.exe; pre-release de teste `teste-deb-7.9`. | CI |
 
 ### Garantia de "sem regressao"

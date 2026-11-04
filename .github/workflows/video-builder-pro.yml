@@ -58,6 +58,8 @@ jobs:
       - name: Instalar Ollama e baixar modelo pequeno
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
+          # O runner nao tem systemd ativo: sobe o servidor na mao (no desktop o servico sobe sozinho)
+          curl -sf http://localhost:11434/api/tags >/dev/null || (nohup ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &)
           for i in $(seq 1 30); do curl -sf http://localhost:11434/api/tags >/dev/null && break; sleep 2; done
           ollama pull qwen2.5:0.5b
       - name: Gerar texto pelo motor do app
