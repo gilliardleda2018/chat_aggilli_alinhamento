@@ -1,5 +1,35 @@
 # Changelog - Video Builder Pro
 
+## [v7.9] - 2026-11-04 - Motor de IA local e gratuito (Ollama), ao lado do Claude
+
+Branch `feat/instalador` (PR #3). Pedido do usuario: sem saldo na API da Anthropic,
+usar uma IA que nao dependa de creditos. Opcao escolhida: **IA local via Ollama**.
+(Usar a assinatura do claude.ai como motor nao e permitido pelos termos da Anthropic
+desde fev/2026, por isso nao foi feito.)
+
+### Decisoes (e por que)
+| Decisao | Motivo | Teste |
+|---|---|---|
+| Novo `modules/motor_local.py` falando com o servidor do Ollama pela API HTTP documentada (`POST /api/chat`, `GET /api/tags`) | Gratis, sem limite e offline depois de baixar o modelo. Nenhum codigo do Ollama (MIT) e copiado; os modelos (Qwen 2.5 Apache-2.0 nas versoes 0.5b/1.5b/7b/14b, Llama 3.2 licenca comunitaria Meta) sao baixados pelo proprio usuario com `ollama pull` e nao vao no instalador. | L01-L05 |
+| `urllib` da biblioteca padrao, **ignorando proxy do sistema** | Sem dependencia nova no pacote; um `http_proxy` configurado no Debian desviaria a conexao para `localhost`. | L02 |
+| `ClaudeEngine` mantem o nome e passa a **despachar** para o motor ativo (`motor_ia` = `claude` ou `ollama`) | Aba IA, Diretor IA, retakes e Revisor ja chamam `self.claude.mensagem(...)`: nenhum deles precisou mudar a chamada, so a checagem `tem_chave()` -> `pronto()`. | L06-L08 |
+| **Claude continua o padrao**; motor invalido na config volta para Claude | Sem regressao para quem ja usa a API: nada muda ate o usuario escolher Ollama. | L06 |
+| Modelos separados (`claude_model` e `ollama_model`) | Trocar de motor nao apaga a escolha do outro. | L07 |
+| Blocos da Anthropic convertidos (texto + imagens base64 -> `images`); imagens so vao para modelos com visao (llava, qwen2.5vl, gemma3...) | O Revisor envia quadros do video; um modelo so-texto ignoraria ou recusaria. Com modelo sem visao a revisao fica tecnica (registrado no log). | L03 |
+| Erro do motor local durante a edicao -> plano heuristico | Modelos pequenos as vezes devolvem JSON invalido; o Diretor ja caia na heuristica e documenta isso no relatorio (comportamento da v7.8 preservado). | L11 |
+| Aba IA: quadro **"Motor de IA"** (Claude / Ollama, modelo local, "Atualizar lista", "Testar motor") com instrucoes de instalacao e **modelo sugerido pela RAM** | O usuario instala e configura sem sair do app. Limites de RAM ~1 GB abaixo do nominal (o Linux reporta 8 GB como ~7,6). | L09, L10, L05 |
+| Diretor IA mostra o motor ativo e se atualiza na troca (`app.ao_mudar_motor`) | Evita a duvida "qual IA esta editando?". | L11 |
+| Erros da API do Claude **traduzidos** (sem credito, chave recusada, 429, sobrecarga, modelo inexistente) com o detalhe tecnico no final | O erro em ingles "credit balance is too low" foi o que o usuario viu; agora diz o que fazer e sugere o motor local. | L12 |
+| CI: job `ollama-real` instala o Ollama oficial, baixa `qwen2.5:0.5b` e gera titulos pelo motor do app | Os testes L usam um servidor que imita o Ollama; este job prova a integracao com o servidor real. | CI |
+| `motor_local` nos `hiddenimports` do PyInstaller; `VERSAO = "7.9"` | O modulo entra no .deb/.exe; pre-release de teste `teste-deb-7.9`. | CI |
+
+### Garantia de "sem regressao"
+| Suite | Antes | Depois |
+|---|---|---|
+| regressao + defeitos + diretor + instalador + correcoes 7.8.1 | 115/115 | 115/115 |
+| `tests/test_motor_local.py` (novos, L01-L12) | - | 12/12 |
+| Tk real (xvfb): aba IA com Ollama selecionado (captura conferida) | - | ok |
+
 ## [v7.8.1] - 2026-11-04 - Correcoes do 1o teste do .deb no Debian (importacao de midia e chave da API)
 
 Branch `feat/instalador` (PR #3). Relato do usuario apos instalar `video-builder-pro_7.8_amd64.deb`:

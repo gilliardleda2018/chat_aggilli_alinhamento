@@ -45,6 +45,35 @@ jobs:
       - name: Suite completa (regressao + defeitos + diretor)
         run: python -m pytest tests -q
 
+  # v7.9: os testes L01-L12 usam um servidor que IMITA o Ollama. Este job confere o
+  # motor local contra o Ollama OFICIAL, com um modelo pequeno (qwen2.5:0.5b, ~400 MB),
+  # pelo mesmo caminho do app (ClaudeEngine -> motor_local -> POST /api/chat).
+  ollama-real:
+    if: ${{ !startsWith(github.ref, 'refs/tags/teste-') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Instalar Ollama e baixar modelo pequeno
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          for i in $(seq 1 30); do curl -sf http://localhost:11434/api/tags >/dev/null && break; sleep 2; done
+          ollama pull qwen2.5:0.5b
+      - name: Gerar texto pelo motor do app
+        env: { HOME: "${{ runner.temp }}/home" }
+        run: |
+          mkdir -p "$HOME"
+          python - <<'EOF'
+          import sys; sys.path[:0] = [".", "modules"]
+          import video_builder_pro_v7_suite as base
+          eng = base.ClaudeEngine(base.ConfigManager(), print)
+          eng.definir_motor("ollama"); eng.definir_modelo("qwen2.5:0.5b")
+          ok, msg = eng.testar_motor(); print(msg); assert ok, msg
+          t = eng.titulos("cafe especial"); print(t); assert len(t) > 20
+          print(eng.mensagem("Responda so com a palavra OK.", max_tokens=10))
+          EOF
+
   windows:
     needs: testes
     if: ${{ !startsWith(github.ref, 'refs/tags/teste-') }}

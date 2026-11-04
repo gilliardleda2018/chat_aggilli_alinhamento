@@ -49,12 +49,15 @@ class PatchDiretor:
         self.diretor: Optional[DiretorIA] = None
         self.ultimo = None
         self.criar_aba(app.nb)
+        if isinstance(getattr(app, "ao_mudar_motor", None), list):   # v7.9: troca de motor na aba IA
+            app.ao_mudar_motor.append(self._atualizar_status_ia)
         self.log(f"PATCH v7.8 (Diretor IA) aplicado: {len(app.nb.tabs())} abas")
 
     # ------------------------------------------------------------ IA
     def _llm(self):
-        """Claude (texto + visao) se houver chave; senao None (modo heuristico)."""
-        if not self.app.claude.tem_chave():
+        """Motor ativo (v7.9: Claude ou Ollama local) se pronto; senao None (modo heuristico).
+        Qualquer erro do motor durante a edicao cai na heuristica (diretor_ia)."""
+        if not self.app.claude.pronto():
             return None
         return self.app.claude.mensagem
 
@@ -149,12 +152,18 @@ class PatchDiretor:
         self.saida_log.insert(tk.END, "Adicione o material bruto, escolha o estilo e clique em EDITAR AUTOMATICAMENTE.\n")
 
     def _atualizar_status_ia(self):
-        if self.app.claude.tem_chave():
-            self.status_ia.config(text=f"[OK] Claude ({self.app.claude.modelo()}): direcao, retakes e revisao visual",
+        c = self.app.claude
+        if c.motor() == "ollama":
+            import motor_local
+            visao = "revisao visual" if motor_local.tem_visao(c.modelo()) else "revisao so tecnica (modelo sem visao)"
+            self.status_ia.config(text=f"[OK] Ollama local ({c.modelo()}): direcao e retakes, {visao}. "
+                                       "Se o modelo falhar, usa o plano heuristico.", foreground="green")
+        elif c.tem_chave():
+            self.status_ia.config(text=f"[OK] Claude ({c.modelo()}): direcao, retakes e revisao visual",
                                   foreground="green")
         else:
-            self.status_ia.config(text="[!] Sem chave da API (aba IA): plano heuristico e revisao so tecnica",
-                                  foreground="orange")
+            self.status_ia.config(text="[!] Sem chave da API e motor local desligado (aba IA): "
+                                       "plano heuristico e revisao so tecnica", foreground="orange")
 
     def _escrever(self, msg: str):
         def _ui():

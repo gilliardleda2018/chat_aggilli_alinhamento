@@ -32,7 +32,7 @@ for lic in (RAIZ / "instalador" / "ffmpeg").glob("LICENSE*"):
 hiddenimports = ["ffmpeg_utils", "ui_thread", "transitions_gl", "luts_manager", "auto_editor",
                  "subtitles_ai", "vertical_converter", "gpu_encoder", "definitive_downloader",
                  "upscaler", "stems_separator", "face_restore", "auto_suite", "transcricao",
-                 "corte_fala", "diretor_ia", "video_builder_pro_v7_suite", "v76_patch", "v78_diretor"]
+                 "corte_fala", "diretor_ia", "motor_local", "video_builder_pro_v7_suite", "v76_patch", "v78_diretor"]
 hiddenimports += collect_submodules("keyring.backends")
 
 # Pacotes opcionais: entram no instalador SE estiverem instalados no build.
