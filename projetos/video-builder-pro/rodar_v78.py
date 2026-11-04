@@ -29,9 +29,10 @@ sys.path.insert(0, str(PASTA / "modules"))
 
 def verificar(destino: str = "") -> int:
     """Diagnostico em texto/JSON. Codigo de saida 0 = instalacao OK."""
-    from ffmpeg_utils import pasta_app, preparar_ffmpeg_embutido
+    from ffmpeg_utils import isolar_subprocessos, pasta_app, preparar_ffmpeg_embutido
     rel = {"python": sys.version.split()[0], "empacotado": bool(getattr(sys, "frozen", False)),
-           "pasta_app": str(pasta_app()), "ffmpeg_embutido": str(preparar_ffmpeg_embutido() or "")}
+           "pasta_app": str(pasta_app()), "subprocessos_isolados": isolar_subprocessos(),
+           "ffmpeg_embutido": str(preparar_ffmpeg_embutido() or "")}
     ok = True
     for prog in ("ffmpeg", "ffprobe", "ffplay"):
         caminho = shutil.which(prog)
@@ -39,8 +40,26 @@ def verificar(destino: str = "") -> int:
         if caminho and prog != "ffplay":
             r = subprocess.run([caminho, "-version"], capture_output=True, text=True)
             rel[prog + "_versao"] = (r.stdout.splitlines() or ["?"])[0][:80]
+            if r.returncode != 0 or not r.stdout.startswith(prog):
+                # v7.8.1: antes isso passava como "ok" (o .deb saiu sem conseguir rodar o ffprobe)
+                rel[prog + "_erro"] = (r.stderr or "").strip()[-300:]
+                ok = False
         elif prog != "ffplay":
             ok = False
+    # Teste funcional: o mesmo caminho da importacao de midia (ffmpeg gera, ffprobe le)
+    try:
+        import tempfile
+        from ffmpeg_utils import executar, info_midia
+        with tempfile.TemporaryDirectory() as tmp:
+            amostra = Path(tmp) / "amostra.mp4"
+            executar(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:d=0.2",
+                      "-pix_fmt", "yuv420p", str(amostra)])
+            info = info_midia(amostra)
+            rel["teste_importacao"] = f"{info['width']}x{info['height']} {info['duracao']:.1f}s"
+            ok = ok and info["tem_video"]
+    except Exception as e:  # noqa: BLE001
+        rel["teste_importacao"] = f"FALHOU: {e}"[:400]
+        ok = False
     try:
         import tkinter  # noqa: F401
         import video_builder_pro_v7_suite as base
@@ -67,6 +86,8 @@ def verificar(destino: str = "") -> int:
 
 
 def main():
+    from ffmpeg_utils import isolar_subprocessos
+    isolar_subprocessos()               # v7.8.1: ffmpeg/ffprobe do sistema sem as libs do pacote
     if "--verificar" in sys.argv:
         k = sys.argv.index("--verificar")
         return verificar(sys.argv[k + 1] if len(sys.argv) > k + 1 else "")

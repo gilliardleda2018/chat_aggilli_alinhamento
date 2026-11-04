@@ -134,6 +134,23 @@ jobs:
           video-builder-pro --verificar
           test -f /usr/share/applications/video-builder-pro.desktop
           sudo apt-get remove -y -q video-builder-pro
+      # v7.8.1: o teste acima roda no MESMO Ubuntu do build e nao pegou o defeito do
+      # Debian do usuario (ffprobe do sistema herdava a libstdc++ antiga do pacote:
+      # "GLIBCXX_3.4.32 not found" -> importacao de video falhava). Agora o .deb e
+      # instalado em Debian 12 e 13 limpos e o --verificar (que importa um video
+      # de teste de verdade) precisa passar em cada um.
+      - name: Testar .deb em Debian 12 e Debian 13 (containers limpos)
+        run: |
+          for img in debian:12 debian:13; do
+            echo "::group::$img"
+            docker run --rm -v "$PWD/dist/instalador:/deb:ro" "$img" sh -ec '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -q >/dev/null
+              apt-get install -y -q /deb/*.deb >/dev/null
+              video-builder-pro --verificar /tmp/v.json || { cat /tmp/v.json; exit 1; }
+              cat /tmp/v.json'
+            echo "::endgroup::"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: instalador-linux

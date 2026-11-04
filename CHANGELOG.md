@@ -1,5 +1,39 @@
 # Changelog - Video Builder Pro
 
+## [v7.8.1] - 2026-11-04 - Correcoes do 1o teste do .deb no Debian (importacao de midia e chave da API)
+
+Branch `feat/instalador` (PR #3). Relato do usuario apos instalar `video-builder-pro_7.8_amd64.deb`:
+"a importacao da midia, dos videos para edicao nao esta funcionando; o salvamento da chave
+api da ia (Claude) nao esta ficando salva, quando mudo a aba ela some".
+
+### Diagnostico (causa raiz, reproduzida antes de corrigir)
+| Sintoma | Causa | Como foi confirmado |
+|---|---|---|
+| Nenhum video entra na timeline | O app empacotado (PyInstaller) define `LD_LIBRARY_PATH=/opt/aggilli/video-builder-pro/_internal`. Os subprocessos herdavam isso, e o `ffprobe`/`ffmpeg` **do sistema** carregavam a `libstdc++` antiga do pacote (Ubuntu 22.04). No Debian do usuario o ffmpeg exige `GLIBCXX_3.4.32`, entao o `ffprobe` morria e todo arquivo era "invalido", sem mensagem na tela. | `LD_LIBRARY_PATH=_internal /usr/bin/ffprobe -version` -> `GLIBCXX_3.4.32 not found`; o `--verificar` do pacote mostrava `"ffmpeg_versao": "?"` e mesmo assim `ok: true`. |
+| Dialogo nao mostra `VIDEO.MP4` | O filtro do Tk no Linux diferencia maiusculas (`*.mp4` nao casa `.MP4`, padrao de cameras/celulares). | Teste C04b. |
+| "A chave some ao mudar de aba" | (1) Colar a chave e trocar de aba **sem clicar em Salvar** perdia a chave; (2) depois de salva, o campo ficava vazio por seguranca (decisao D44 da v7.7) e parecia que a chave tinha sumido, sem indicacao de que estava salva. | Harness com Tk real (xvfb): a chave salva persistia; a colada e nao salva se perdia. |
+
+### Decisoes (e por que)
+| Decisao | Motivo | Teste |
+|---|---|---|
+| `isolar_subprocessos()` (em `ffmpeg_utils`), chamado no inicio do `rodar_v78.main()`: no app empacotado e fora do Windows, todo `subprocess.Popen` recebe `env` sem o `LD_LIBRARY_PATH` do pacote (restaura `LD_LIBRARY_PATH_ORIG` se existir) | Corrige na origem para TODOS os programas externos (ffmpeg, ffprobe, yt-dlp, xdg-open...), sem precisar mexer em cada chamada. O proprio app continua usando as libs dele. Em codigo-fonte e no Windows nao muda nada. Idempotente. | C01, C02 |
+| Filtros de arquivo com maiusculas e minusculas + "Todos os arquivos" (`tipos_video()`/`tipos_midia()` unicos para base, v76 e Diretor IA) | Arquivos `.MP4`/`.MOV` de camera apareciam ocultos. Uma fonte so evita divergencia entre abas. | C03, C04b |
+| Importacao mostra **quais** arquivos falharam e por que | Antes a falha so ia para o log; o usuario via "nada acontece". | C04 |
+| `--verificar` reprova se ffmpeg/ffprobe nao rodam e faz uma **importacao real** de um video gerado | O verificar antigo dava `ok: true` com o ffprobe quebrado; foi por isso que o CI nao pegou o defeito. | C09 |
+| CI instala o `.deb` em containers **Debian 12 e Debian 13** limpos e roda o `--verificar` | O teste anterior rodava no mesmo Ubuntu do build (mesma libstdc++), onde o defeito nao aparece. | CI |
+| Campo da chave mostra uma **mascara** (`************************`, que NAO e a chave) + rotulo verde "Chave salva (termina em ...XXXX) - onde" | Mantem a decisao de seguranca da v7.7 (a chave nao volta para o widget) e mostra claramente que esta salva. | C05, D44 (atualizado) |
+| **Salvamento automatico** ao sair do campo ou trocar de aba, quando o texto comeca com `sk-ant-` | Era exatamente o relato: colar, mudar de aba, perder. Texto sem `sk-ant-` nao e salvo sozinho (pergunta ao clicar Salvar). | C10, Tk real |
+| Botao **Testar chave** (GET `/v1/models`, em segundo plano) e Enter salva | Confirma que a chave funciona sem gastar tokens; erros 401/403 e falta de rede viram mensagens claras. | C06, C08 |
+| `onde_esta_chave` tolera erro do cofre (keyring) | Cofre bloqueado derrubava a montagem da aba IA; agora cai no arquivo (chmod 600). | C07 |
+| `VERSAO = "7.8.1"` | A pre-release de teste vira `teste-deb-7.8.1`, separada da 7.8 com defeito. | I07 |
+
+### Garantia de "sem regressao"
+| Suite | Antes | Depois |
+|---|---|---|
+| regressao + defeitos + diretor + instalador | 103/103 | 103/103 (D44 ajustado a mascara: a chave continua fora do campo) |
+| `tests/test_correcoes_781.py` (novos, C01-C10) | - | 11/11 |
+| Verificacao com Tk real (xvfb): colar chave -> trocar todas as abas -> chave salva e mascarada; importar `CLIP.MP4` com `LD_LIBRARY_PATH` do pacote simulado | - | ok |
+
 ## [v7.8 - instalador] - 2026-11-03 - Instaladores Windows (.exe) e Linux (.deb) com o logo da Aggilli
 
 Branch `feat/instalador`, empilhada sobre `feat/v7.8-diretor-ia` (PR #2).

@@ -184,7 +184,8 @@ class PatchDiretor:
 
     # ------------------------------------------------------------ acoes
     def adicionar(self):
-        for f in filedialog.askopenfilenames(filetypes=[("Videos", "*.mp4 *.mov *.mkv *.avi *.m4v *.webm")]):
+        from ffmpeg_utils import tipos_video
+        for f in filedialog.askopenfilenames(filetypes=tipos_video()):
             self.arquivos.append(Path(f))
         self._atualizar_lista()
 

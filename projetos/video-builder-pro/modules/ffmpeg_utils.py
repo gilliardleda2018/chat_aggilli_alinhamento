@@ -67,6 +67,60 @@ def preparar_ffmpeg_embutido() -> Optional[Path]:
     return None
 
 
+def ambiente_sem_pacote(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Ambiente para programas EXTERNOS (ffmpeg, ffprobe, xdg-open...).
+
+    v7.8.1: no Linux, o PyInstaller poe a pasta interna do pacote em
+    LD_LIBRARY_PATH (e guarda o valor original em LD_LIBRARY_PATH_ORIG). Os
+    filhos herdavam isso e o ffprobe do sistema carregava a libstdc++ antiga
+    do pacote: "GLIBCXX_3.4.32 not found" -> nenhum video era importado.
+    Aqui o valor original e restaurado so para os processos filhos.
+    """
+    env = dict(os.environ if env is None else env)
+    if getattr(sys, "frozen", False) and os.name != "nt":
+        for var in ("LD_LIBRARY_PATH",):
+            original = env.pop(var + "_ORIG", None)
+            if original:
+                env[var] = original
+            else:
+                env.pop(var, None)
+    return env
+
+
+def isolar_subprocessos() -> bool:
+    """No app empacotado (Linux), faz TODO subprocess usar ambiente_sem_pacote().
+    Cobre tambem bibliotecas de terceiros que chamam o ffmpeg (ex.: yt-dlp).
+    Sem efeito ao rodar pelo codigo-fonte ou no Windows. Idempotente."""
+    if not getattr(sys, "frozen", False) or os.name == "nt" or getattr(subprocess.Popen, "_vbp_isolado", False):
+        return False
+    original = subprocess.Popen.__init__
+
+    def __init__(self, *args, **kwargs):
+        kwargs["env"] = ambiente_sem_pacote(kwargs.get("env"))
+        original(self, *args, **kwargs)
+    subprocess.Popen.__init__ = __init__
+    subprocess.Popen._vbp_isolado = True
+    return True
+
+
+EXTS_VIDEO = (".mp4", ".mov", ".avi", ".mkv", ".mts", ".m4v", ".webm")
+EXTS_AUDIO = (".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg")
+
+
+def padroes_arquivo(exts) -> str:
+    """Padroes para filedialog com minusculas E maiusculas: no Linux o dialogo
+    do Tk diferencia ("*.mp4" nao mostrava "VIDEO.MP4" de celulares/cameras)."""
+    return " ".join(f"*{e.lower()} *{e.upper()}" for e in exts)
+
+
+def tipos_video():
+    return [("Videos", padroes_arquivo(EXTS_VIDEO)), ("Todos os arquivos", "*")]
+
+
+def tipos_midia():
+    return [("Audio/Video", padroes_arquivo(EXTS_VIDEO + EXTS_AUDIO)), ("Todos os arquivos", "*")]
+
+
 # ------------------------------------------------------------------ logging
 _LOGGER_PRONTO = False
 

@@ -5,7 +5,7 @@ Le a versao do app (VERSAO em video_builder_pro_v7_suite.py), imprime-a e gera
 instalador/versao_windows.txt: metadados do .exe no Windows (Propriedades >
 Detalhes: empresa "Aggilli Intelligence", produto, versao).
 
-Uso: python instalador/versao.py   ->  imprime "7.8"
+Uso: python instalador/versao.py   ->  imprime "7.8.1"
 """
 
 import re
