@@ -199,3 +199,18 @@ def test_C10_trocar_de_aba_sem_salvar_nao_perde_a_chave(log):
     app.api_key_entry.insert(0, "texto-qualquer")  # sem sk-ant-: nao salva sozinho
     app._chave_auto_salvar()
     assert app.config.get_api_key("claude") == chave
+
+
+@pytest.mark.skipif(os.name == "nt", reason="LD_LIBRARY_PATH e do Linux")
+def test_C11_verificar_informa_isolamento_ja_feito_pelo_main(monkeypatch, tmp_path):
+    """O main() isola antes do --verificar; o relatorio dizia false (2a chamada)."""
+    monkeypatch.setattr(subprocess.Popen, "__init__", subprocess.Popen.__init__)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    import ffmpeg_utils, rodar_v78
+    try:
+        ffmpeg_utils.isolar_subprocessos()
+        rodar_v78.verificar(str(tmp_path / "v.json"))
+        assert json.loads((tmp_path / "v.json").read_text(encoding="utf-8"))["subprocessos_isolados"] is True
+    finally:
+        if hasattr(subprocess.Popen, "_vbp_isolado"):
+            del subprocess.Popen._vbp_isolado

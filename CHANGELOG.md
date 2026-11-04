@@ -25,13 +25,14 @@ api da ia (Claude) nao esta ficando salva, quando mudo a aba ela some".
 | **Salvamento automatico** ao sair do campo ou trocar de aba, quando o texto comeca com `sk-ant-` | Era exatamente o relato: colar, mudar de aba, perder. Texto sem `sk-ant-` nao e salvo sozinho (pergunta ao clicar Salvar). | C10, Tk real |
 | Botao **Testar chave** (GET `/v1/models`, em segundo plano) e Enter salva | Confirma que a chave funciona sem gastar tokens; erros 401/403 e falta de rede viram mensagens claras. | C06, C08 |
 | `onde_esta_chave` tolera erro do cofre (keyring) | Cofre bloqueado derrubava a montagem da aba IA; agora cai no arquivo (chmod 600). | C07 |
+| `--verificar` informa o isolamento ja feito pelo `main()` | No 1o CI no Debian o relatorio dizia `subprocessos_isolados: false` (2a chamada e no-op), embora o ffprobe do sistema rodasse. Diagnostico tem que ser fiel. | C11 |
 | `VERSAO = "7.8.1"` | A pre-release de teste vira `teste-deb-7.8.1`, separada da 7.8 com defeito. | I07 |
 
 ### Garantia de "sem regressao"
 | Suite | Antes | Depois |
 |---|---|---|
 | regressao + defeitos + diretor + instalador | 103/103 | 103/103 (D44 ajustado a mascara: a chave continua fora do campo) |
-| `tests/test_correcoes_781.py` (novos, C01-C10) | - | 11/11 |
+| `tests/test_correcoes_781.py` (novos, C01-C11) | - | 12/12 |
 | Verificacao com Tk real (xvfb): colar chave -> trocar todas as abas -> chave salva e mascarada; importar `CLIP.MP4` com `LD_LIBRARY_PATH` do pacote simulado | - | ok |
 
 ## [v7.8 - instalador] - 2026-11-03 - Instaladores Windows (.exe) e Linux (.deb) com o logo da Aggilli

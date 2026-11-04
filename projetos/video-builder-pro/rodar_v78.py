@@ -31,7 +31,7 @@ def verificar(destino: str = "") -> int:
     """Diagnostico em texto/JSON. Codigo de saida 0 = instalacao OK."""
     from ffmpeg_utils import isolar_subprocessos, pasta_app, preparar_ffmpeg_embutido
     rel = {"python": sys.version.split()[0], "empacotado": bool(getattr(sys, "frozen", False)),
-           "pasta_app": str(pasta_app()), "subprocessos_isolados": isolar_subprocessos(),
+           "pasta_app": str(pasta_app()), "subprocessos_isolados": isolar_subprocessos() or getattr(subprocess.Popen, "_vbp_isolado", False),
            "ffmpeg_embutido": str(preparar_ffmpeg_embutido() or "")}
     ok = True
     for prog in ("ffmpeg", "ffprobe", "ffplay"):
