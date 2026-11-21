@@ -70,7 +70,7 @@ class _TransicoesTabState extends State<TransicoesTab> {
         for (var i = 1; i < clips.length; i++)
           ListTile(
             contentPadding: EdgeInsets.zero,
-            title: Text('Entre ${i} e ${i + 1}: ${baseName(clips[i].source)}', maxLines: 1, overflow: TextOverflow.ellipsis),
+            title: Text('Entre $i e ${i + 1}: ${baseName(clips[i].source)}', maxLines: 1, overflow: TextOverflow.ellipsis),
             subtitle: Text(clips[i].transition == null
                 ? 'corte seco'
                 : '${clips[i].transition!.type} · ${clips[i].transition!.duration.toStringAsFixed(1)} s'),

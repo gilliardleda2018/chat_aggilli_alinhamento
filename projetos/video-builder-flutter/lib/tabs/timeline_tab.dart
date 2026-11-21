@@ -35,8 +35,7 @@ class TimelineTab extends StatelessWidget {
             physics: const NeverScrollableScrollPhysics(),
             buildDefaultDragHandles: false,
             itemCount: plan.clips.length,
-            onReorder: (from, to) {
-              if (to > from) to -= 1;
+            onReorderItem: (from, to) {
               final c = plan.clips.removeAt(from);
               plan.clips.insert(to, c);
               app.touch();

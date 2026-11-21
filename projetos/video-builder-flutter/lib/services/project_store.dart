@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/edit_plan.dart';
 
 /// Projetos salvos no aparelho (equivalente ao arquivo .vbp do desktop).
-/// Cada projeto é o JSON do EditPlan + metadados. Chave: "projeto:<id>".
+/// Cada projeto é o JSON do EditPlan + metadados. Chave: `projeto:<id>`.
 class SavedProject {
   final String id;
   final String name;

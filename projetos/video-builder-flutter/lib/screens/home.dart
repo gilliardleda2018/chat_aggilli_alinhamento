@@ -54,7 +54,7 @@ final List<TabDef> kTabs = [
   TabDef('Enviar / Importar', Icons.upload_file, 'Content Tools', (_) => const EnviarTab()),
   TabDef('Face Restore', Icons.face_retouching_natural, 'Content Tools', (_) => const FaceRestoreTab(),
       pending: true),
-  TabDef('WhisperX', Icons.karaoke, 'Content Tools', (_) => const WhisperxTab(), pending: true),
+  TabDef('WhisperX', Icons.lyrics, 'Content Tools', (_) => const WhisperxTab(), pending: true),
   TabDef('Auto-Edit Suite', Icons.dashboard_customize, 'Content Tools', (_) => const AutoSuiteTab()),
 ];
 
