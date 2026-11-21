@@ -78,23 +78,30 @@ jobs:
       - name: Compilar APK
         run: flutter build apk --release --build-number=${{ github.run_number }}
 
+      - name: Compilar AAB para a Play Store (só com a chave definitiva)
+        if: ${{ hashFiles('projetos/video-builder-flutter/android/key.properties') != '' }}
+        run: flutter build appbundle --release --build-number=${{ github.run_number }}
+
       - name: Renomear
         run: |
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk "dist/VideoBuilder-${GITHUB_SHA::7}.apk"
+          if [ -f build/app/outputs/bundle/release/app-release.aab ]; then
+            cp build/app/outputs/bundle/release/app-release.aab "dist/VideoBuilder-${GITHUB_SHA::7}.aab"
+          fi
           ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: VideoBuilder-apk
-          path: projetos/video-builder-flutter/dist/*.apk
+          path: projetos/video-builder-flutter/dist/*
 
       - name: Publicar no pre-release apk-latest (link fixo para o celular)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete apk-latest --cleanup-tag -y || true
-          gh release create apk-latest dist/*.apk \
+          gh release create apk-latest dist/* \
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "Video Builder APK (${GITHUB_REF_NAME}, ${GITHUB_SHA::7})" \

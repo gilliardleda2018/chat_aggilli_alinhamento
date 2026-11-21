@@ -43,3 +43,13 @@ Aggilli no Android Developer Console com o SHA-256 acima. Por isso a chave defin
 - Sem os segredos, sai assinado com a chave de depuração gerada no próprio build. Funciona para instalar, mas
   **cada build tem uma chave diferente**: para instalar uma versão nova é preciso desinstalar a anterior.
   Criar a chave definitiva é o próximo passo recomendado (ver README, seção "Assinatura").
+
+## Instalação pela Play Store (teste interno) — 21/11/2026
+
+O APK publicado (versionCode 4, minSdk 24, targetSdk 36, assinatura v2) foi baixado e inspecionado: está íntegro.
+O bloqueio no aparelho vem da verificação de desenvolvedor, não do arquivo. Caminhos sem o fluxo avançado de 24 h:
+
+1. **Teste interno da Play Console** (recomendado): com a chave definitiva configurada, o workflow também gera o
+   `.aab` e anexa ao `apk-latest`. A Aggilli cria o app `br.com.aggilli.videobuilder` na Play Console, envia o `.aab`
+   na faixa "Teste interno" e o dono instala pelo link da Play Store, sem bloqueio de instalação externa.
+2. **Registro do pacote** no Android Developer Console com o SHA-256 desta chave, para o APK direto instalar.
