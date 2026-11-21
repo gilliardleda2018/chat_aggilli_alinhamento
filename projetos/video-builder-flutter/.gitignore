@@ -1,0 +1,19 @@
+# Gerados (ADR-F05: android/ é criado no build pelo GitHub Actions)
+android/
+ios/
+linux/
+macos/
+windows/
+web/
+build/
+dist/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.idea/
+*.iml
+.metadata
+pubspec.lock
+*.jks
+key.properties

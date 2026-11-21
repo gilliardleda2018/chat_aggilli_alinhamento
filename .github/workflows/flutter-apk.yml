@@ -1,0 +1,100 @@
+# Gera o APK do Video Builder (app Flutter) a cada mudança em projetos/video-builder-flutter.
+# Decisão e detalhes: projetos/video-builder-flutter/docs/decisoes/ADR-F05-apk-pelo-github-actions.md
+name: APK Video Builder (Flutter)
+
+on:
+  push:
+    paths:
+      - 'projetos/video-builder-flutter/**'
+      - '.github/workflows/flutter-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flutter-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: projetos/video-builder-flutter
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Versão do Flutter
+        run: flutter --version
+
+      - name: Gerar a pasta android/ (não versionada)
+        run: |
+          flutter create --platforms=android --org br.com.aggilli --project-name videobuilder .
+          python3 tool/patch_android.py .
+
+      - name: Dependências
+        run: flutter pub get
+
+      - name: Análise estática (informativa)
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Testes
+        run: flutter test
+
+      - name: Chave de assinatura (se os segredos existirem)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "Sem segredos de assinatura: o APK sai com a chave de depuração (ver ADR-F05)."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          {
+            echo "storeFile=$RUNNER_TEMP/release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > android/key.properties
+          echo "APK será assinado com a chave definitiva."
+
+      - name: Compilar APK
+        run: flutter build apk --release --build-number=${{ github.run_number }}
+
+      - name: Renomear
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/VideoBuilder-${GITHUB_SHA::7}.apk"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoBuilder-apk
+          path: projetos/video-builder-flutter/dist/*.apk
+
+      - name: Publicar no pre-release apk-latest (link fixo para o celular)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk-latest --cleanup-tag -y || true
+          gh release create apk-latest dist/*.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Video Builder APK (${GITHUB_REF_NAME}, ${GITHUB_SHA::7})" \
+            --notes "APK gerado automaticamente pelo workflow em $(date -u +'%Y-%m-%d %H:%M UTC'). Branch ${GITHUB_REF_NAME}. Se aparecer 'conflito de pacote' ao instalar, desinstale a versão anterior (ver ADR-F05)."
