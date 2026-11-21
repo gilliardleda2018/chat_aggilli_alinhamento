@@ -42,9 +42,17 @@ keytool -genkey -v -keystore videobuilder.jks -keyalg RSA -keysize 2048 -validit
 base64 -w0 videobuilder.jks   # copie a saída
 ```
 
-No GitHub: Settings → Secrets and variables → Actions → crie `ANDROID_KEYSTORE_BASE64` (saída acima),
-`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` (`videobuilder`) e `ANDROID_KEY_PASSWORD`. Guarde o `.jks` em local
-seguro: sem ele não é possível atualizar o app na Play Store.
+No GitHub: Settings → Secrets and variables → Actions → crie `ANDROID_KEYSTORE_BASE64` (saída acima) e
+`ANDROID_KEYSTORE_PASSWORD`. Guarde o `.jks` em local seguro: sem ele não é possível atualizar o app na Play Store.
+
+> A chave definitiva já foi gerada em 21/11/2026 (alias `videobuilder`; SHA-256 no ADR-F05). Falta só criar os
+> dois segredos.
+
+### "O Android não deixa instalar"
+
+Desde 30/09/2026, Android certificado no Brasil bloqueia apps de desenvolvedor não verificado. Até o app ser
+registrado pela Aggilli no Android Developer Console, use o fluxo avançado que o próprio aviso oferece (configuração
+única e espera de 24 h) ou, em aparelho Samsung, confira também o "Bloqueador automático" em Segurança.
 
 ## Desenvolver
 

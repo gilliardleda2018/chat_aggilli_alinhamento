@@ -69,8 +69,9 @@ jobs:
           {
             echo "storeFile=$RUNNER_TEMP/release.jks"
             echo "storePassword=$KEYSTORE_PASSWORD"
-            echo "keyAlias=$KEY_ALIAS"
-            echo "keyPassword=$KEY_PASSWORD"
+            # Alias e senha da chave são opcionais: padrão "videobuilder" e a mesma senha do arquivo (PKCS12).
+            echo "keyAlias=${KEY_ALIAS:-videobuilder}"
+            echo "keyPassword=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
           } > android/key.properties
           echo "APK será assinado com a chave definitiva."
 

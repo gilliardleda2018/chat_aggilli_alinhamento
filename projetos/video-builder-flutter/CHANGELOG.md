@@ -1,5 +1,14 @@
 # Changelog · Video Builder app Flutter
 
+## [Não lançado]
+
+### Adicionado
+- Chave de assinatura definitiva gerada (alias `videobuilder`, SHA-256 no ADR-F05), entregue ao dono, fora do repositório.
+- Documentação do bloqueio de instalação no Brasil (verificação de desenvolvedor) e do caminho para resolver.
+
+### Alterado
+- Workflow: bastam 2 segredos (`ANDROID_KEYSTORE_BASE64` e `ANDROID_KEYSTORE_PASSWORD`); alias e senha da chave têm padrão.
+
 ## [8.0.0] - 2026-11-21
 
 Primeira versão do app Android, reestruturando o Video Builder Pro desktop v7.6 em Flutter.
