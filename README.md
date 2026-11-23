@@ -6,7 +6,7 @@ Repositório de contexto e habilidades para trabalho contínuo com IA.
 
 | Projeto | Versão Atual | Status |
 |---------|-------------|--------|
-| Video Builder Pro (desktop) | **v7.5** | ✅ Completo e funcional |
+| Video Builder Pro (desktop) | **v7.6** | [Instalação e aba Download](#instalação-em-um-checkout-limpo) |
 | Video Builder app Android (Flutter) | **8.0.0** | 🧪 Primeira versão; renderiza no servidor. Ver [`projetos/video-builder-flutter`](projetos/video-builder-flutter/README.md) |
 
 ## Video Builder Pro v7.5
@@ -57,21 +57,20 @@ chat_aggilli_alinhamento/
 └── skills/              # Skills do Claude
 ```
 
-## Retomada Rápida
+## Instalação em um checkout limpo
 
-1. Leia `contextos/2026-10-23_final-do-dia.md`
-2. Execute `python rodar_v75.py` na pasta local
-3. App abre com 19 abas funcionais
+1. Instale Python 3.11 ou superior com Tkinter. No Debian ou Ubuntu, o Tkinter é fornecido pelo pacote `python3-tk`. Use `python -m tkinter` para verificar a instalação.
+2. Instale o FFmpeg e deixe-o no `PATH` para juntar vídeo e áudio. Para baixar do YouTube, instale o Deno 2.3 ou superior. Deixe-o no `PATH` ou coloque `deno` (`deno.exe` no Windows) em `.video_builder_pro/runtime/` na raiz do checkout.
+3. Na raiz do repositório, instale as dependências e abra o aplicativo. No Linux, use `python3` se o comando `python` estiver indisponível.
 
-## Instalação Rápida
+   ```bash
+   python -m pip install --upgrade --target .video_builder_pro/runtime/python -r projetos/video-builder-pro/requirements.txt
+   python projetos/video-builder-pro/rodar_v76.py
+   ```
 
-```bash
-# Básico (app funciona)
-pip install requests Pillow
+4. Na aba **Download**, cole a URL, selecione a qualidade, clique em **Baixar Vídeo** e escolha a pasta de destino. No Windows, você também pode abrir o app pelo `VideoBuilderPro_v73.bat`, que chama o launcher v7.6.
 
-# Completo (todas as features)
-pip install openai-whisper insightface opencv-python demucs whisperx gfpgan realesrgan yt-dlp faster-whisper
-```
+O arquivo de dependências instala a revisão oficial do `yt-dlp` que corrige `addOnDisposeCallback`, incluindo os scripts EJS compatíveis. O launcher carrega as dependências do diretório local do projeto. Se o YouTube exigir login, o downloader pode usar a sessão de um perfil de navegador detectado. [Correção do yt-dlp](https://github.com/yt-dlp/yt-dlp/pull/18124)
 
 ## Última Atualização
 
@@ -82,4 +81,4 @@ pip install openai-whisper insightface opencv-python demucs whisperx gfpgan real
 1. **Retomar trabalho**: Leia o contexto mais recente em `contextos/`
 2. **Ver código**: Navegue em `projetos/video-builder-pro/`
 3. **Restaurar versão**: Copie de `backups/` para sua máquina
-4. **Executar app**: `python rodar_v75.py`
+4. **Executar app**: `python projetos/video-builder-pro/rodar_v76.py`

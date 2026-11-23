@@ -313,11 +313,11 @@ class V73Patch:
         esq.pack_propagate(False)
         sf = ttk.LabelFrame(esq, text="Status", padding=8)
         sf.pack(fill=tk.X, pady=(0, 6))
-        if self.downloader is not None:
-            ttk.Label(sf, text="[OK] yt-dlp + instaloader prontos", foreground="green").pack(anchor=tk.W)
+        if self.downloader is not None and self.downloader.disponivel:
+            ttk.Label(sf, text="[OK] yt-dlp disponível", foreground="green").pack(anchor=tk.W)
             ttk.Label(sf, text="YouTube, Instagram, TikTok, Vimeo...", foreground="green").pack(anchor=tk.W)
         else:
-            ttk.Label(sf, text="[!] pip install yt-dlp instaloader", foreground="red").pack(anchor=tk.W)
+            ttk.Label(sf, text="[!] Instale as dependências conforme o README", foreground="red").pack(anchor=tk.W)
         uf = ttk.LabelFrame(esq, text="URL do Video", padding=8)
         uf.pack(fill=tk.X, pady=(0, 6))
         self.download_url = ttk.Entry(uf, font=("Consolas", 9))
@@ -806,7 +806,9 @@ class V73Patch:
     def obter_info_video(self):
         url = self.download_url.get().strip()
         if not url: messagebox.showwarning("Aviso", "Cole uma URL primeiro!"); return
-        if self.downloader is None: messagebox.showerror("Erro", "pip install yt-dlp"); return
+        if self.downloader is None or not self.downloader.disponivel:
+            messagebox.showerror("Erro", "Downloader indisponível. Verifique o log e a instalação do yt-dlp.")
+            return
         def t():
             try:
                 info = self.downloader.obter_info(url)
@@ -820,14 +822,17 @@ class V73Patch:
     def baixar_video(self):
         url = self.download_url.get().strip()
         if not url: messagebox.showwarning("Aviso", "Cole uma URL primeiro!"); return
-        if self.downloader is None: messagebox.showerror("Erro", "Downloader indisponivel."); return
+        if self.downloader is None or not self.downloader.disponivel:
+            messagebox.showerror("Erro", "Downloader indisponível. Verifique o log e a instalação do yt-dlp.")
+            return
         p = filedialog.askdirectory(title="Pasta de destino")
         if not p: return
+        qualidade = self.download_qualidade.get()
         def t():
             try:
                 self.download_log.delete(1.0, tk.END)
                 self.download_log.insert(tk.END, f"Baixando: {url}\n")
-                arq = self.downloader.baixar_video(url, Path(p), self.download_qualidade.get())
+                arq = self.downloader.baixar_video(url, Path(p), qualidade)
                 self.download_log.insert(tk.END, f"[OK] {arq}\n")
                 messagebox.showinfo("Sucesso", "Baixado!")
             except Exception as e:
@@ -838,7 +843,9 @@ class V73Patch:
     def baixar_playlist(self):
         url = self.download_url.get().strip()
         if not url: messagebox.showwarning("Aviso", "Cole uma URL!"); return
-        if self.downloader is None: messagebox.showerror("Erro", "Downloader indisponivel."); return
+        if self.downloader is None or not self.downloader.disponivel:
+            messagebox.showerror("Erro", "Downloader indisponível. Verifique o log e a instalação do yt-dlp.")
+            return
         p = filedialog.askdirectory(title="Pasta de destino")
         if not p: return
         def t():

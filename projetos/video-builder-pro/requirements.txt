@@ -1,0 +1,4 @@
+# Corrige addOnDisposeCallback no player do YouTube (yt-dlp #18124).
+yt-dlp[default] @ https://codeload.github.com/yt-dlp/yt-dlp/tar.gz/fa9a87158bc6c1b8ec3e720fcb1c41e1ba62055d#sha256=4e274b97bee3875fd0915efc22f3283a032eb70cb1d3817009acdd8ff820bf3d
+# Acesso ao chaveiro para sessões de navegadores Chromium no Linux.
+SecretStorage; sys_platform == "linux"

@@ -11,14 +11,16 @@ Editor de vídeo profissional em Python + Tkinter com FFmpeg e Claude AI.
 | v7.0 | 22/10/2026 | Claude AI integrada | ✅ Estável |
 | v6.0 | - | Legado | 📦 Arquivo |
 
-## Requisitos
+Para instalar a versão com a aba **Download**, siga a [instalação em um checkout limpo](../../README.md#instalação-em-um-checkout-limpo).
+
+## Requisitos das versões anteriores
 
 - Python 3.10+
 - FFmpeg instalado e no PATH
 - Tkinter (incluído no Python)
 - requests, Pillow (opcionais)
 
-## Instalação
+## Instalação das versões anteriores
 
 1. Clone este repositório
 2. Instale dependências: `pip install requests Pillow`

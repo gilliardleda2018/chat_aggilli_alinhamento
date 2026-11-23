@@ -1,7 +1,4 @@
 from pathlib import Path
-import subprocess
-import shutil
-import os
 
 try:
     import yt_dlp
@@ -17,21 +14,11 @@ except ImportError:
 
 
 def _detectar_browser():
-    """
-    Detecta navegador e perfil correto, mesmo rodando como root.
-    Procura nos perfis do usuario real (SUDO_USER ou home /home/*).
-    """
-    # Usuario real (pode ser diferente de root)
-    usuario_real = os.environ.get("SUDO_USER") or os.environ.get("USER", "")
-    homes_candidatos = []
-
-    if usuario_real and usuario_real != "root":
-        homes_candidatos.append(Path(f"/home/{usuario_real}"))
-
-    # Fallback: varre /home/
-    for home in Path("/home").iterdir():
-        if home.is_dir() and home not in homes_candidatos:
-            homes_candidatos.append(home)
+    """Procura perfis de navegador na pasta do usuário atual."""
+    try:
+        home = Path.home()
+    except (OSError, RuntimeError):
+        return None, None
 
     # Mapeamento: browser -> caminhos possiveis do perfil
     perfis = {
@@ -52,12 +39,14 @@ def _detectar_browser():
         ],
     }
 
-    for home in homes_candidatos:
-        for browser, subpaths in perfis.items():
-            for sub in subpaths:
-                full = home / sub
-                if full.exists():
+    for browser, subpaths in perfis.items():
+        for sub in subpaths:
+            full = home / sub
+            try:
+                if full.is_dir():
                     return browser, str(full)
+            except OSError:
+                continue
 
     return None, None
 
@@ -77,29 +66,28 @@ class DefinitiveDownloader:
                 self.log(f"[OK] Cookies: {browser} em {path}")
             else:
                 self.log("[AVISO] Nenhum perfil de navegador encontrado.")
-                self.log("[AVISO] Videos do YouTube podem falhar por bot-check.")
-                self.log("[DICA] Exporte cookies manualmente:")
-                self.log("  yt-dlp --cookies cookies.txt <URL>")
-                self.log("  e use o arquivo cookies.txt no campo de cookies")
 
         if INSTA_OK:
             self.log("[OK] instaloader disponivel")
 
+    @property
+    def disponivel(self):
+        return YT_DLP_OK
+
     def _opcoes_base(self):
         """Opcoes base com cookies se disponivel."""
         opts = {"quiet": True}
-        if self.browser:
-            opts["cookiesfrombrowser"] = (self.browser, self.browser_path)
-        # Fallback: arquivo cookies.txt na pasta do app
         cookies_file = Path(__file__).parent.parent / "cookies.txt"
         if cookies_file.exists():
             opts["cookiefile"] = str(cookies_file)
             self.log(f"[OK] Usando cookies.txt: {cookies_file}")
+        elif self.browser:
+            opts["cookiesfrombrowser"] = (self.browser, self.browser_path)
         return opts
 
     def obter_info(self, url: str) -> dict:
         if not YT_DLP_OK:
-            raise Exception("yt-dlp nao instalado: pip install yt-dlp")
+            raise Exception("yt-dlp indisponível. Siga a instalação no README.")
         opts = self._opcoes_base()
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -113,7 +101,7 @@ class DefinitiveDownloader:
 
     def baixar_video(self, url: str, pasta: Path, qualidade: str = "best") -> Path:
         if not YT_DLP_OK:
-            raise Exception("yt-dlp nao instalado: pip install yt-dlp")
+            raise Exception("yt-dlp indisponível. Siga a instalação no README.")
         formatos = {
             "best":  "bestvideo+bestaudio/best",
             "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
@@ -121,34 +109,37 @@ class DefinitiveDownloader:
             "480p":  "bestvideo[height<=480]+bestaudio/best[height<=480]",
             "audio": "bestaudio/best",
         }
-        saida = [None]
+        saida = None
 
-        def hook(d):
-            if d["status"] == "finished":
-                saida[0] = Path(d["filename"])
+        def registrar_arquivo(caminho):
+            nonlocal saida
+            saida = Path(caminho)
 
         opts = self._opcoes_base()
         opts.update({
             "outtmpl": str(pasta / "%(title)s.%(ext)s"),
             "format": formatos.get(qualidade, formatos["best"]),
             "merge_output_format": "mp4",
-            "progress_hooks": [hook],
+            "post_hooks": [registrar_arquivo],
             "quiet": False,
         })
 
         self.log(f"Baixando: {url}")
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
-        return saida[0] or pasta
+        if saida is None or not saida.is_file():
+            raise RuntimeError("O yt-dlp não retornou um arquivo de vídeo.")
+        return saida
 
     def baixar_playlist(self, url: str, pasta: Path, max_videos: int = 10) -> list:
         if not YT_DLP_OK:
-            raise Exception("yt-dlp nao instalado: pip install yt-dlp")
+            raise Exception("yt-dlp indisponível. Siga a instalação no README.")
         arquivos = []
 
-        def hook(d):
-            if d["status"] == "finished":
-                arquivos.append(Path(d["filename"]))
+        def registrar_arquivo(caminho):
+            arquivo = Path(caminho)
+            if arquivo.is_file():
+                arquivos.append(arquivo)
 
         opts = self._opcoes_base()
         opts.update({
@@ -157,11 +148,13 @@ class DefinitiveDownloader:
             "merge_output_format": "mp4",
             "playlistend": max_videos,
             "ignoreerrors": True,
-            "progress_hooks": [hook],
+            "post_hooks": [registrar_arquivo],
             "quiet": False,
         })
 
         self.log(f"Baixando playlist (max {max_videos}): {url}")
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
+        if not arquivos:
+            raise RuntimeError("Nenhum vídeo da playlist foi baixado. Consulte o erro do yt-dlp no terminal.")
         return arquivos
