@@ -6,7 +6,8 @@ Repositório de contexto e habilidades para trabalho contínuo com IA.
 
 | Projeto | Versão Atual | Status |
 |---------|-------------|--------|
-| Video Builder Pro | **v7.5** | ✅ Completo e funcional |
+| Video Builder Pro (desktop) | **v7.5** | ✅ Completo e funcional |
+| Video Builder app Android (Flutter) | **8.0.0** | 🧪 Primeira versão; renderiza no servidor. Ver [`projetos/video-builder-flutter`](projetos/video-builder-flutter/README.md) |
 
 ## Video Builder Pro v7.5
 

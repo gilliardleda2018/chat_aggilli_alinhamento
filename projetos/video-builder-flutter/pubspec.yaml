@@ -1,0 +1,25 @@
+name: videobuilder
+description: "Video Builder Pro (Aggilli) para Android: edição no celular, renderização no servidor."
+publish_to: 'none'
+version: 8.0.0+1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  crypto: ^3.0.5
+  flutter_secure_storage: ^9.2.2
+  shared_preferences: ^2.3.2
+  url_launcher: ^6.3.0
+  file_picker: ^10.3.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

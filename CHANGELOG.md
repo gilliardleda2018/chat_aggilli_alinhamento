@@ -1,5 +1,16 @@
 # Changelog - Video Builder Pro
 
+## [v8.0.0 app Android] - 2026-11-21
+
+### Adicionado
+- `projetos/video-builder-flutter/`: Video Builder reestruturado em Flutter para Android, com as 20 abas do
+  desktop. O processamento acontece no servidor `mcp_videobuilder`; mídias e vídeos ficam no Nextcloud.
+  Detalhes em `projetos/video-builder-flutter/CHANGELOG.md` e nos ADR-F01 a ADR-F05.
+- `.github/workflows/flutter-apk.yml`: gera o APK e publica no pre-release `apk-latest`.
+
+### Não muda
+- O app desktop (v7.5/v7.6) segue igual em `projetos/video-builder-pro/`.
+
 ## [v7.5] - 2026-10-23 (FINAL)
 
 ### Adicionado
